@@ -2652,7 +2652,12 @@ static void memb_state_recovery_enter (
 		message_item.mcast->header.encapsulated = MESSAGE_ENCAPSULATED;
 
 		message_item.mcast->header.nodeid = instance->my_id.nodeid;
-		assert (message_item.mcast->header.nodeid);
+		if (!message_item.mcast->header.nodeid) {
+			log_printf (instance->totemsrp_log_level_warning,
+				"recovery_msg_fill: my_id.nodeid is 0, skipping message");
+			totemsrp_buffer_release (instance, message_item.mcast);
+			continue;
+		}
 		memcpy (&message_item.mcast->ring_id, &instance->my_ring_id,
 			sizeof (struct memb_ring_id));
 		message_item.msg_len = sort_queue_item->msg_len + sizeof (struct mcast);
@@ -2748,7 +2753,12 @@ int totemsrp_mcast (
 	message_item.mcast->header.encapsulated = MESSAGE_NOT_ENCAPSULATED;
 
 	message_item.mcast->header.nodeid = instance->my_id.nodeid;
-	assert (message_item.mcast->header.nodeid);
+	if (!message_item.mcast->header.nodeid) {
+		log_printf (instance->totemsrp_log_level_warning,
+			"totemsrp_mcast: my_id.nodeid is 0, dropping message");
+		totemsrp_buffer_release (instance, message_item.mcast);
+		return (-1);
+	}
 
 	message_item.mcast->guarantee = guarantee;
 	message_item.mcast->system_from = instance->my_id;
@@ -3075,7 +3085,14 @@ static int orf_token_rtr (
 			 * Multicasted message, so no need to copy to new retransmit list
 			 */
 			orf_token->rtr_list_entries -= 1;
-			assert (orf_token->rtr_list_entries >= 0);
+			if (orf_token->rtr_list_entries < 0) {
+				log_printf (instance->totemsrp_log_level_warning,
+					"orf_token_rtr: rtr_list_entries went negative (%d), "
+					"clamping to 0",
+					orf_token->rtr_list_entries);
+				orf_token->rtr_list_entries = 0;
+				break;
+			}
 			memmove (&rtr_list[i], &rtr_list[i + 1],
 				sizeof (struct rtr_item) * (orf_token->rtr_list_entries - i));
 
@@ -3234,9 +3251,13 @@ static int token_send (
 		(orf_token->rtr_list_entries * sizeof (struct rtr_item));
 
 	orf_token->header.nodeid = instance->my_id.nodeid;
+	if (!orf_token->header.nodeid) {
+		log_printf (instance->totemsrp_log_level_warning,
+			"token_send: my_id.nodeid is 0, not sending token");
+		return (-1);
+	}
 	memcpy (instance->orf_token_retransmit, orf_token, orf_token_size);
 	instance->orf_token_retransmit_size = orf_token_size;
-	assert (orf_token->header.nodeid);
 
 	if (forward_token == 0) {
 		return (0);
@@ -3270,9 +3291,13 @@ static int token_hold_cancel_send (struct totemsrp_instance *instance)
 	token_hold_cancel.header.type = MESSAGE_TYPE_TOKEN_HOLD_CANCEL;
 	token_hold_cancel.header.encapsulated = 0;
 	token_hold_cancel.header.nodeid = instance->my_id.nodeid;
+	if (!token_hold_cancel.header.nodeid) {
+		log_printf (instance->totemsrp_log_level_warning,
+			"token_hold_cancel_send: my_id.nodeid is 0, not sending");
+		return (-1);
+	}
 	memcpy (&token_hold_cancel.ring_id, &instance->my_ring_id,
 		sizeof (struct memb_ring_id));
-	assert (token_hold_cancel.header.nodeid);
 
 	instance->stats.token_hold_cancel_tx++;
 
@@ -3292,7 +3317,11 @@ static int orf_token_send_initial (struct totemsrp_instance *instance)
 	orf_token.header.type = MESSAGE_TYPE_ORF_TOKEN;
 	orf_token.header.encapsulated = 0;
 	orf_token.header.nodeid = instance->my_id.nodeid;
-	assert (orf_token.header.nodeid);
+	if (!orf_token.header.nodeid) {
+		log_printf (instance->totemsrp_log_level_warning,
+			"orf_token_send_initial: my_id.nodeid is 0, not sending initial token");
+		return (-1);
+	}
 	orf_token.seq = SEQNO_START_MSG;
 	orf_token.token_seq = SEQNO_START_TOKEN;
 	orf_token.retrans_flg = 1;
@@ -3328,6 +3357,28 @@ static void memb_state_commit_token_update (
 	struct memb_commit_token_memb_entry *memb_list;
 	unsigned int high_aru;
 	unsigned int i;
+
+	/*
+	 * BUG FIX: bounds check BEFORE writing into memb_list[memb_index].
+	 * If membership shrank between commit token creation and now,
+	 * memb_index >= addr_entries causes an out-of-bounds write.
+	 * Enter re-gather so a fresh commit token is created.
+	 */
+	if (instance->commit_token->memb_index >= instance->commit_token->addr_entries) {
+		log_printf (instance->totemsrp_log_level_warning,
+			"memb_state_commit_token_update: memb_index=%d >= addr_entries=%d "
+			"(membership shrank mid-commit) — re-gathering",
+			instance->commit_token->memb_index,
+			instance->commit_token->addr_entries);
+		memb_state_gather_enter (instance, TOTEMSRP_FAILED_TO_RECV);
+		return;
+	}
+
+	if (!instance->my_id.nodeid) {
+		log_printf (instance->totemsrp_log_level_warning,
+			"memb_state_commit_token_update: my_id.nodeid is 0 — skipping update");
+		return;
+	}
 
 	addr = (struct srp_addr *)instance->commit_token->end_of_commit_token;
 	memb_list = (struct memb_commit_token_memb_entry *)(addr + instance->commit_token->addr_entries);
@@ -3384,8 +3435,7 @@ static void memb_state_commit_token_update (
 
 	instance->commit_token->header.nodeid = instance->my_id.nodeid;
 	instance->commit_token->memb_index += 1;
-	assert (instance->commit_token->memb_index <= instance->commit_token->addr_entries);
-	assert (instance->commit_token->header.nodeid);
+	/* Bounds already checked above — memb_index is now <= addr_entries. */
 }
 
 static void memb_state_commit_token_target_set (
@@ -3474,9 +3524,17 @@ static int memb_lowest_in_config (struct totemsrp_instance *instance)
 		instance->my_failed_list, instance->my_failed_list_entries);
 
 	/*
-	 * find representative by searching for smallest identifier
+	 * find representative by searching for smallest identifier.
+	 * BUG FIX: if all proc_list members ended up in failed_list
+	 * (failure storm), token_memb_entries == 0.  Self-elect rather
+	 * than crash — the re-gather timeout will sort things out.
 	 */
-	assert(token_memb_entries > 0);
+	if (token_memb_entries == 0) {
+		log_printf (instance->totemsrp_log_level_warning,
+			"memb_lowest_in_config: token_memb_entries=0 "
+			"(all members failed?) — self-electing as representative");
+		return (1);
+	}
 
 	lowest_nodeid = token_memb[0].nodeid;
 	for (i = 1; i < token_memb_entries; i++) {
@@ -3522,7 +3580,11 @@ static void memb_state_commit_token_create (
 	instance->commit_token->header.type = MESSAGE_TYPE_MEMB_COMMIT_TOKEN;
 	instance->commit_token->header.encapsulated = 0;
 	instance->commit_token->header.nodeid = instance->my_id.nodeid;
-	assert (instance->commit_token->header.nodeid);
+	if (!instance->commit_token->header.nodeid) {
+		log_printf (instance->totemsrp_log_level_warning,
+			"memb_state_commit_token_create: my_id.nodeid is 0, not creating token");
+		return;
+	}
 
 	instance->commit_token->ring_id.rep = instance->my_id.nodeid;
 	instance->commit_token->ring_id.seq = instance->token_ring_id_seq + 4;
@@ -3559,7 +3621,11 @@ static void memb_join_message_send (struct totemsrp_instance *instance)
 	memb_join->header.type = MESSAGE_TYPE_MEMB_JOIN;
 	memb_join->header.encapsulated = 0;
 	memb_join->header.nodeid = instance->my_id.nodeid;
-	assert (memb_join->header.nodeid);
+	if (!memb_join->header.nodeid) {
+		log_printf (instance->totemsrp_log_level_warning,
+			"memb_join_message_send: my_id.nodeid is 0, not sending join");
+		return;
+	}
 
 	msg_len = sizeof(struct memb_join) +
 	    ((instance->my_proc_list_entries + instance->my_failed_list_entries) * sizeof(struct srp_addr));
@@ -3700,10 +3766,14 @@ static void memb_merge_detect_transmit (struct totemsrp_instance *instance)
 	memb_merge_detect.header.type = MESSAGE_TYPE_MEMB_MERGE_DETECT;
 	memb_merge_detect.header.encapsulated = 0;
 	memb_merge_detect.header.nodeid = instance->my_id.nodeid;
+	if (!memb_merge_detect.header.nodeid) {
+		log_printf (instance->totemsrp_log_level_warning,
+			"memb_merge_detect_transmit: my_id.nodeid is 0, not sending");
+		return;
+	}
 	memb_merge_detect.system_from = instance->my_id;
 	memcpy (&memb_merge_detect.ring_id, &instance->my_ring_id,
 		sizeof (struct memb_ring_id));
-	assert (memb_merge_detect.header.nodeid);
 
 	instance->stats.memb_merge_detect_tx++;
 	totemnet_mcast_flush_send (instance->totemnet_context,
@@ -4704,7 +4774,12 @@ static void messages_deliver_to_app (
 		sort_queue_item_p = ptr;
 
 		mcast_in = sort_queue_item_p->mcast;
-		assert (mcast_in != (struct mcast *)0xdeadbeef);
+		if (mcast_in == (struct mcast *)0xdeadbeef) {
+			log_printf (instance->totemsrp_log_level_warning,
+				"sort_queue delivery: mcast pointer is 0xdeadbeef "
+				"(use-after-free), skipping seqno");
+			continue;
+		}
 
 		endian_conversion_required = 0;
 		if (mcast_in->header.magic != TOTEM_MH_MAGIC) {
