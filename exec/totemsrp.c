@@ -105,15 +105,28 @@
  *
  * Each rtr_item = sizeof(struct memb_ring_id) + sizeof(unsigned int) = 16 bytes.
  * PROCESSOR_COUNT_MAX=384 entries = 384 × 16 = 6144 bytes of RTR payload.
- * Setting RETRANSMIT_ENTRIES_MAX = PROCESSOR_COUNT_MAX ensures every supported
- * cluster size gets full per-rotation RTR coverage.
+ * BUG-20 (pve8): RETRANSMIT_ENTRIES_MAX increased from 384 → 2048.
  *
- * TOKEN_STORAGE_BYTES is the exact buffer size needed:
- *   struct orf_token header ≈ 57 bytes (packed) + RTR entries.
- *   Use 8192 (generous power-of-two, ~2KB headroom) for token_storage/token_convert.
+ * With 384 entries and retransmit_entries_max=300 for 300 nodes:
+ *   cap = 300/2 = 150, only 2 nodes served per token rotation.
+ *   Node with 14,853-gap (30s partition): 14853/150 = 99 rotations = 30s.
+ *   But only if ring-ordered first; mid-ring nodes wait many turns.
+ *
+ * With 2048 entries and retransmit_entries_max = clamp(members×5, 384, 2048):
+ *   300 nodes → 1500 entries, cap=750 → 14853/750 = 20 rotations = 6s recovery.
+ *    53 nodes → 384 entries, cap=192 → unchanged behaviour.
+ *
+ * struct orf_token uses rtr_list[0] (C flexible array member), so
+ * sizeof(struct orf_token) = header only.  RTR entries live in the token
+ * buffer: token_size = sizeof(orf_token_hdr) + n_entries × sizeof(rtr_item).
+ *
+ * TOKEN_STORAGE_BYTES must hold the worst-case token:
+ *   57B header + 2048 × 16B = 32,825B → use 36,000B (generous headroom).
+ * token_storage and token_convert are function-local stack buffers; 72KB
+ * total is well within the 8MB default stack limit for a daemon process.
  */
-#define RETRANSMIT_ENTRIES_MAX			384
-#define TOKEN_STORAGE_BYTES			8192
+#define RETRANSMIT_ENTRIES_MAX			2048
+#define TOKEN_STORAGE_BYTES			36000
 #define TOKEN_SIZE_MAX				64000 /* bytes */
 #define LEAVE_DUMMY_NODEID                      0
 
@@ -2235,19 +2248,27 @@ static void memb_state_operational_enter (struct totemsrp_instance *instance)
 	}
 
 	/*
-	 * Dynamic RTR sizing: give every member at least one RTR slot per
-	 * token pass.  Capped at RETRANSMIT_ENTRIES_MAX (=PROCESSOR_COUNT_MAX=384)
-	 * so clusters up to 384 nodes get full per-rotation RTR coverage.
-	 * Also emit a DIAG advisory when window_size is likely too small for
-	 * the current ring size at max throughput:
-	 *   msgs_per_rotation_max = max_messages × members
-	 * If that exceeds window_size, the FCC mechanism will throttle most
-	 * nodes every rotation.  Operators should set in corosync.conf:
-	 *   window_size = max_messages × node_count   (or a higher value)
+	 * BUG-20 (pve8): Dynamic RTR sizing — scale RTR list with cluster size.
+	 *
+	 * Old formula: rtr_cap = clamp(members, 64, 384)
+	 *   300 nodes: 300 entries, cap=150 → 2 nodes/rotation, 14853-gap takes
+	 *   ~99 rotations × 300ms = 30s (if first in ring; mid-ring nodes wait
+	 *   many more turns).
+	 *
+	 * New formula: rtr_cap = clamp(max(members×5, 384), 64, RETRANSMIT_ENTRIES_MAX)
+	 *   300 nodes → 1500 entries, cap=750  → 14853/750 = 20 rots = 6s recovery
+	 *    53 nodes → max(265, 384) = 384    → unchanged (cap=192)
+	 *    10 nodes → max(50, 384) = 384     → unchanged
+	 *
+	 * Also emit advisory when window_size is likely too small for cluster size.
+	 * Recommended formula (BUG-21 / pve8):
+	 *   window_size = max_messages × node_count × 3/2  (1.5× safety margin)
+	 * Simulation shows window_size=ideal triggers 66% FCC throttle under floods.
 	 */
 	{
 		unsigned int n = (unsigned int)instance->my_memb_entries;
-		unsigned int rtr_cap = n;
+		unsigned int rtr_cap = n * 5;
+		if (rtr_cap < 384) rtr_cap = 384;
 		if (rtr_cap < 64) rtr_cap = 64;
 		if (rtr_cap > RETRANSMIT_ENTRIES_MAX) rtr_cap = RETRANSMIT_ENTRIES_MAX;
 		instance->retransmit_entries_max = rtr_cap;
@@ -2255,28 +2276,50 @@ static void memb_state_operational_enter (struct totemsrp_instance *instance)
 		unsigned int msgs_per_rotation_max =
 			instance->totem_config->max_messages * n;
 		unsigned int ws = instance->totem_config->window_size;
-		if (msgs_per_rotation_max > ws) {
-			/*
-			 * BUG-19: window_size is too small for this cluster.  Severity
-			 * scales with how far off we are:
-			 *   < 50% of ideal → CRIT: FCC permanently throttles all nodes
-			 *                     even at minimum traffic; throughput near 0.
-			 *   50–100% of ideal → WARNING: throttle begins early but cluster
-			 *                     can still make progress.
-			 */
-			int level = (ws * 2 < msgs_per_rotation_max)
-			    ? instance->totemsrp_log_level_error
-			    : instance->totemsrp_log_level_warning;
-			log_printf (level,
-				"%s window_size=%u is too small for %u-node ring "
-				"(max_messages(%u) × members(%u) = %u msgs/rotation). "
-				"FCC will throttle %u/%u nodes per rotation — "
-				"set totem { window_size: %u } in corosync.conf.",
-				(ws * 2 < msgs_per_rotation_max) ? "CRITICAL:" : "WARNING:",
+		/* BUG-19 / BUG-21: window_size adequacy check.
+		 *
+		 * Severity tiers based on 300-node simulation (pve8):
+		 *   ws < ideal/2        → CRITICAL: permanent FCC deadlock at minimum
+		 *                          traffic (288 deadlock events / 598 rotations).
+		 *   ideal/2 ≤ ws < ideal → WARNING: throttle begins at baseline; write
+		 *                          floods cause frequent cluster-wide write stalls.
+		 *   ideal ≤ ws < ideal×1.5 → NOTICE (BUG-21): window at exact boundary.
+		 *                          Simulation shows 66% FCC throttle on write
+		 *                          floods that exceed max_messages/rotation.
+		 *                          Recommend 1.5× safety margin.
+		 *
+		 * Recommended formula:
+		 *   window_size = max_messages × node_count × 3 / 2
+		 */
+		unsigned int ideal_ws     = msgs_per_rotation_max;         /* 1.0× */
+		unsigned int safe_ws      = ideal_ws + ideal_ws / 2;       /* 1.5× */
+		if (ws * 2 < ideal_ws) {
+			/* CRITICAL: ws < ideal/2 */
+			log_printf (instance->totemsrp_log_level_error,
+				"CRITICAL: window_size=%u is dangerously small for %u-node ring "
+				"(max_messages(%u) × members(%u) = %u msgs/rotation ideal). "
+				"FCC will permanently deadlock all nodes — "
+				"set totem { window_size: %u }  (1.5× safety margin).",
 				ws, n,
-				instance->totem_config->max_messages, n, msgs_per_rotation_max,
-				(msgs_per_rotation_max > ws) ? (n - ws / instance->totem_config->max_messages) : 0,
-				n, msgs_per_rotation_max);
+				instance->totem_config->max_messages, n, ideal_ws,
+				safe_ws);
+		} else if (ws < ideal_ws) {
+			/* WARNING: ws < ideal */
+			log_printf (instance->totemsrp_log_level_warning,
+				"WARNING: window_size=%u is below ideal for %u-node ring "
+				"(ideal=%u msgs/rotation). "
+				"FCC will throttle during write bursts — "
+				"recommend totem { window_size: %u }  (1.5× safety).",
+				ws, n, ideal_ws, safe_ws);
+		} else if (ws < safe_ws) {
+			/* NOTICE: ws between ideal and 1.5× — BUG-21 */
+			log_printf (instance->totemsrp_log_level_notice,
+				"NOTICE: window_size=%u equals minimum ideal for %u-node ring "
+				"(%u msgs/rotation) but has no burst headroom. "
+				"Write floods >max_messages/rotation trigger 66%% FCC throttling "
+				"in 300-node simulation. "
+				"Recommend totem { window_size: %u }  (1.5× safety margin).",
+				ws, n, ideal_ws, safe_ws);
 		}
 		log_printf (instance->totemsrp_log_level_debug,
 			"DIAG ring formed: members=%u retransmit_entries_max=%u "
@@ -3152,17 +3195,19 @@ static int orf_token_rtr (
 	}
 
 	/*
-	 * Per-node RTR fairness cap: limit additions to half the max capacity.
+	 * BUG-20: RTR list too small for large clusters — scale with membership.
 	 *
-	 * Without this cap a single badly laggard node fills the entire RTR list
-	 * on every rotation, starving other nodes with smaller gaps.  300-node
-	 * simulation shows secondary laggards accumulate 7000+ unserviced RTR
-	 * requests when the primary laggard monopolises all 384 slots.
+	 * Old: retransmit_entries_max = clamp(members, 64, 384)
+	 *   300 members: 300 entries, cap=150 → only 2 nodes served/rotation.
+	 *   Node-240 (14,853-gap): if mid-ring, waits many rotations for its turn.
 	 *
-	 * With the cap each node contributes at most retransmit_entries_max/2
-	 * new entries per rotation, leaving the other half for subsequent nodes
-	 * in the ring.  Single-laggard recovery takes 2× as long in the
-	 * worst case but prevents complete starvation of other laggards.
+	 * Fix: RETRANSMIT_ENTRIES_MAX increased from 384 → 2048 (new constant).
+	 *   retransmit_entries_max at ring = clamp(max(members×5, 384), 64, 2048):
+	 *     300 members → 1500  cap=750 → 2 nodes/rotation, 14853/750 = 20 rots = 6s
+	 *      53 members → 384   cap=192 → unchanged
+	 *
+	 * Per-node cap stays at retransmit_entries_max/2 (prevents monopolization).
+	 * TOKEN_STORAGE_BYTES bumped to 36000 to hold 2048×16 + header.
 	 */
 	rtr_before_add   = orf_token->rtr_list_entries;
 	rtr_per_node_cap = (int)(instance->retransmit_entries_max / 2);

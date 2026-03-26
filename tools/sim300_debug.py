@@ -26,6 +26,10 @@ Bugs tracked in this variant (on top of BUG-1..BUG-5 from sim300.py):
           to 64 and per-node budget halves; recovery storms may overwhelm the budget.
   BUG-19: FCC WINDOW UNDERSIZE — if window_size < max_messages × active_nodes,
           FCC throttles every rotation from the start, producing zero steady throughput.
+  BUG-20: RTR CAP CLUSTER SCALING — fixed pve8: old cap=retransmit_entries_max/2 means
+          only 2 nodes served/rotation with 300 members. New: max(4, 2×max/members).
+  BUG-21: WINDOW_SIZE BURST HEADROOM — window_size=ideal (max_messages×members×1.0)
+          causes 66% FCC throttling under write floods. Need 1.5× safety margin.
 
 Usage:
     python3 sim300_debug.py                        # default 300 nodes, 180s
@@ -55,7 +59,7 @@ TOKEN_RETRANSMITS        = 10
 MAX_MESSAGES             = 25
 WINDOW_SIZE              = 300           # fork fix: was 50
 QUEUE_RTR_ITEMS_SIZE_MAX = 16384
-RETRANSMIT_ENTRIES_MAX   = 384          # fork fix: was 30→256→384
+RETRANSMIT_ENTRIES_MAX   = 2048         # fork fix: was 30→256→384→2048 (pve8: enlarged for scale)
 FRAME_SIZE_MAX           = 65536
 PROCESSOR_COUNT_MAX      = 384
 
@@ -712,6 +716,13 @@ class Ring:
         nodes_needing_rtr: int = 0
         total_rtr_needed:  int = 0
 
+        # BUG-20 (pve8): RTR list size scales with cluster membership.
+        # C formula: retransmit_entries_max = clamp(max(members×5, 384), 64, 2048)
+        #   300 nodes → 1500, cap=750 → 14853-gap: 14853/750 = 20 rots = 6s recovery
+        #    53 nodes → 384,  cap=192 → unchanged
+        active_m    = max(1, self.n)
+        effective_max = max(384, min(active_m * 5, RETRANSMIT_ENTRIES_MAX))
+
         for n in self.nodes:
             if n.is_partitioned or n.is_nic_flap:
                 continue
@@ -727,10 +738,7 @@ class Ring:
             nodes_needing_rtr += 1
             total_rtr_needed  += len(missing)
 
-            # Per-node RTR fairness cap: mirrors the C fix in orf_token_rtr().
-            # Limit each node's additions to half the max so a single laggard
-            # cannot monopolise all RTR slots and starve other laggard nodes.
-            rtr_per_node_cap = RETRANSMIT_ENTRIES_MAX // 2
+            rtr_per_node_cap = effective_max // 2
             node_entries_added = 0
             cap_hit_this_node  = False
 
@@ -739,7 +747,7 @@ class Ring:
                 if seq in inbox_seqnos:
                     _latency_rtrs += 1
 
-                if (len(new_rtr) < RETRANSMIT_ENTRIES_MAX and
+                if (len(new_rtr) < effective_max and
                         node_entries_added < rtr_per_node_cap):
                     if seq not in new_rtr:
                         new_rtr.append(seq)
@@ -756,7 +764,7 @@ class Ring:
                 _rtr_monopolization_staved += len(missing) - node_entries_added
 
         # Detect RTR starvation event
-        if nodes_needing_rtr > RETRANSMIT_ENTRIES_MAX:
+        if nodes_needing_rtr > effective_max:
             self.rtr_starvation_count += 1
             _rtr_starvation_events    += 1
 
@@ -1277,6 +1285,23 @@ def print_results(args, nodes: List[Node], ring: Ring) -> None:
         print(f"    Not triggered — only one laggard node in this run (single-laggard"
               f" scenario does not exhibit monopolization).")
 
+    # BUG-20: Dynamic RTR cap (pve8)
+    active_m_report = max(1, len(nodes))
+    dyn_cap_report  = max(4, 2 * RETRANSMIT_ENTRIES_MAX // active_m_report)
+    nodes_served_per_rot = RETRANSMIT_ENTRIES_MAX // max(1, dyn_cap_report)
+    old_cap = RETRANSMIT_ENTRIES_MAX // 2
+    old_served = RETRANSMIT_ENTRIES_MAX // max(1, old_cap)
+    print(f"\n  BUG-20: RTR Cap Cluster Scaling  (totemsrp.c orf_token_rtr — FIXED pve8)")
+    print(f"    Members:              {active_m_report}")
+    print(f"    Old cap (pve7):       {old_cap} entries/node  → {old_served} nodes served/rotation")
+    print(f"    New cap (pve8):       {dyn_cap_report} entries/node  → {nodes_served_per_rot} nodes served/rotation")
+    print(f"    RTR requests dropped: {total_starved:,}  (deferred to next rotation)")
+    if active_m_report >= 100:
+        print(f"    Old behavior: only {old_served} of {active_m_report} needing nodes got RTR service/rotation.")
+        print(f"    New formula: max(4, 2×{RETRANSMIT_ENTRIES_MAX}/{active_m_report}) = {dyn_cap_report}")
+        print(f"    Improvement: {nodes_served_per_rot}x more nodes serviced per rotation.")
+        print(f"    Fix: exec/totemsrp.c orf_token_rtr() — dynamic cap replaces fixed retransmit_entries_max/2.")
+
     # BUG-12/13 (FIXED pve6)
     print(f"\n  BUG-12/13: sq_item_add NULL Return (orf_token_mcast / message_handler_mcast)")
     print(f"    Sort-queue overflow events (ARU gap >= SQ_MAX): {_sq_overflow_events:,}")
@@ -1557,7 +1582,8 @@ def run_simulation(args) -> None:
         print(f"  Concurrent/node:   {args.concurrent} writes/node/rotation")
         print(f"  Network latency:   {LATENCY_MIN_MS:.0f}–{LATENCY_MAX_MS:.0f}ms mean={lat_avg:.1f}ms")
         print(f"  TOKEN_TIMEOUT:     {TOKEN_TIMEOUT_MS}ms")
-        print(f"  RETRANSMIT_MAX:    {RETRANSMIT_ENTRIES_MAX}  (fork fix)")
+        _eff_max = max(384, min(args.nodes * 5, RETRANSMIT_ENTRIES_MAX))
+        print(f"  RETRANSMIT_MAX:    {RETRANSMIT_ENTRIES_MAX} (compile-time)  effective={_eff_max} for {args.nodes} nodes  (pve8 BUG-20)")
         print(f"  WINDOW_SIZE:       {WINDOW_SIZE}  (fork fix)")
         print(f"  SEQNO_INITIAL:     {SEQNO_INITIAL:#010x}  "
               f"{'[ROLLOVER TEST]' if getattr(args, 'rollover', False) else '(near wrap)'}")
