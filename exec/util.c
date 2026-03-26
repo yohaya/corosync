@@ -82,7 +82,7 @@ const char * short_service_name_get(uint32_t service_id,
 			return (servicenames[i].c_name);
 		}
 	}
-	snprintf(buf, buf_size, "%d", service_id);
+	snprintf(buf, buf_size, "%u", service_id);
 	return buf;
 }
 

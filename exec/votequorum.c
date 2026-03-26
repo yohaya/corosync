@@ -1168,7 +1168,7 @@ static int votequorum_read_nodelist_configuration(uint32_t *votes,
 
 	while ((iter_key = icmap_iter_next(iter, NULL, NULL)) != NULL) {
 
-		res = sscanf(iter_key, "nodelist.node.%u.%s", &node_pos, tmp_key);
+		res = sscanf(iter_key, "nodelist.node.%u.%254s", &node_pos, tmp_key);
 		if (res != 2) {
 			continue;
 		}

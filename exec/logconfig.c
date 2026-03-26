@@ -594,7 +594,7 @@ static int corosync_main_config_read_logging (
 	cmap_iter_init(cmap_handle, "logging.logger_subsys.", &iter);
 	while ((cmap_iter_next(cmap_handle, iter, key_name, NULL, NULL)) == CS_OK) {
 #endif
-		res = sscanf(key_name, "logging.logger_subsys.%[^.].%s", key_subsys, key_item);
+		res = sscanf(key_name, "logging.logger_subsys.%254[^.].%254s", key_subsys, key_item);
 
 		if (res != 2) {
 			continue ;

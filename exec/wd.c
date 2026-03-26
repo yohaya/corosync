@@ -425,11 +425,18 @@ static int32_t wd_resource_create (char *res_path, char *res_name)
 	struct resource *ref = calloc (1, sizeof (struct resource));
 	char key_name[ICMAP_KEYNAME_MAXLEN];
 
-	strcpy(ref->res_path, res_path);
+	if (ref == NULL) {
+		log_printf (LOGSYS_LEVEL_ERROR,
+			"calloc failed in wd_resource_create for %s", res_name);
+		return (-1);
+	}
+	strncpy(ref->res_path, res_path, sizeof(ref->res_path) - 1);
+	ref->res_path[sizeof(ref->res_path) - 1] = '\0';
 	ref->check_timeout = WD_DEFAULT_TIMEOUT_MS;
 	ref->check_timer = 0;
 
-	strcpy(ref->name, res_name);
+	strncpy(ref->name, res_name, sizeof(ref->name) - 1);
+	ref->name[sizeof(ref->name) - 1] = '\0';
 	ref->fsm.name = ref->name;
 	ref->fsm.table = wd_fsm_table;
 	ref->fsm.entries = sizeof(wd_fsm_table) / sizeof(struct cs_fsm_entry);
@@ -528,7 +535,7 @@ static void wd_resource_created_cb(
 		return ;
 	}
 
-	res = sscanf(key_name, "resources.%[^.].%[^.].%[^.]", res_type, res_name, tmp_key);
+	res = sscanf(key_name, "resources.%254[^.].%254[^.].%254[^.]", res_type, res_name, tmp_key);
 	if (res != 3) {
 		return ;
 	}
@@ -556,7 +563,7 @@ static void wd_scan_resources (void)
 
 	iter = icmap_iter_init("resources.");
 	while ((key_name = icmap_iter_next(iter, NULL, NULL)) != NULL) {
-		res = sscanf(key_name, "resources.%[^.].%[^.].%[^.]", res_type, res_name, tmp_key);
+		res = sscanf(key_name, "resources.%254[^.].%254[^.].%254[^.]", res_type, res_name, tmp_key);
 		if (res != 3) {
 			continue ;
 		}

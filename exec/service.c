@@ -279,7 +279,7 @@ static unsigned int service_unlink_and_exit (
 	found_service_name = NULL;
 	iter = icmap_iter_init("internal_configuration.service.");
 	while ((iter_key_name = icmap_iter_next(iter, NULL, NULL)) != NULL) {
-		res = sscanf(iter_key_name, "internal_configuration.service.%hu.%s", &service_id, key_name);
+		res = sscanf(iter_key_name, "internal_configuration.service.%hu.%254s", &service_id, key_name);
 		if (res != 2) {
 			continue;
 		}
@@ -456,6 +456,11 @@ unsigned int corosync_service_unlink_and_exit (
 
 	assert (api);
 	service_unlink_and_exit_data = malloc (sizeof (struct service_unlink_and_exit_data));
+	if (service_unlink_and_exit_data == NULL) {
+		log_printf (LOGSYS_LEVEL_ERROR,
+			"malloc failed in corosync_service_unlink_and_exit — cannot schedule service exit");
+		return (-1);
+	}
 	service_unlink_and_exit_data->api = api;
 	service_unlink_and_exit_data->name = strdup (service_name);
 	service_unlink_and_exit_data->ver = service_ver;

@@ -617,7 +617,13 @@ static void send_nodelist_library_notification(void *conn, int send_joined_left_
 		size += sizeof(mar_uint32_t) * my_left_list_entries;
 	}
 
-	buf = alloca(size);
+	buf = malloc(size);
+	if (!buf) {
+		log_printf(LOGSYS_LEVEL_ERROR,
+			"malloc(%d) failed in send_nodelist_library_notification — "
+			"skipping nodelist notification", size);
+		return;
+	}
 	memset(buf, 0, size);
 
 	res_lib_quorum_v1_nodelist_notification = (struct res_lib_quorum_v1_nodelist_notification *)buf;
@@ -672,6 +678,7 @@ static void send_nodelist_library_notification(void *conn, int send_joined_left_
 		}
 	}
 
+	free(buf);
 	return;
 }
 

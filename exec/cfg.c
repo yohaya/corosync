@@ -971,7 +971,7 @@ static void message_handler_req_lib_cfg_ringstatusget (
 			res = CS_ERR_NAME_TOO_LONG;
 			goto send_response;
 		}
-		snprintf(ifname, sizeof(ifname), "%d %s", iface_ids[i], totem_ip_string);
+		snprintf(ifname, sizeof(ifname), "%u %s", iface_ids[i], totem_ip_string);
 
 		if (strlen(status[i]) >= CFG_INTERFACE_STATUS_MAX_LEN) {
 			log_printf(LOGSYS_LEVEL_ERROR, "Status string for interface %u is too long", i);
@@ -1169,7 +1169,7 @@ static void message_handler_req_lib_cfg_killnode (
 	map = icmap_get_global_map();
 	iter = icmap_iter_init_r(map, "runtime.members.");
 	while ((iter_key = icmap_iter_next(iter, NULL, NULL)) != NULL) {
-		if (sscanf(iter_key, "runtime.members.%u.%s", &nodeid, key_name) != 2) {
+		if (sscanf(iter_key, "runtime.members.%u.%254s", &nodeid, key_name) != 2) {
 			continue;
 		}
 		if (strcmp(key_name, "status") != 0) {

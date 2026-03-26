@@ -478,7 +478,7 @@ static int parse_section(FILE *fp,
 	return 0;
 
 parse_error:
-	if (snprintf(formated_err, sizeof(formated_err), "parser error: %s:%u: %s", fname, *line_no,
+	if (snprintf(formated_err, sizeof(formated_err), "parser error: %s:%d: %s", fname, *line_no,
 	    tmp_error_string) >= sizeof(formated_err)) {
 		*error_string = "Can't format parser error message";
 	} else {
@@ -1627,10 +1627,13 @@ safe_atoq_error:
 	 */
 	min_val = max_val = 0;
 	/*
-	 * This is really assert, because developer ether doesn't set val_type correctly or
-	 * we've got here after some nasty memory overwrite
+	 * safe_atoq_range sets min_val/max_val for the error message below.
+	 * If it fails, val_type is bad (developer error or memory corruption).
 	 */
-	assert(safe_atoq_range(val_type, &min_val, &max_val) == 0);
+	if (safe_atoq_range(val_type, &min_val, &max_val) != 0) {
+		*error_string = "Internal error: invalid value type in config parser";
+		return (0);
+	}
 
 	if (snprintf(formated_err, sizeof(formated_err),
 	    "Value of key \"%s\" is expected to be integer in range (%lld..%lld), but \"%s\" was given",

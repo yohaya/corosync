@@ -394,14 +394,14 @@ int totem_volatile_config_validate (
 	if (totem_config->max_network_delay < MINIMUM_TIMEOUT) {
 		snprintf (local_error_reason, sizeof(local_error_reason),
 			"The max_network_delay parameter (%d ms) may not be less than (%d ms).",
-			totem_config->max_network_delay, MINIMUM_TIMEOUT);
+			(int)totem_config->max_network_delay, MINIMUM_TIMEOUT);
 		goto parse_error;
 	}
 
 	if (totem_config->token_timeout < MINIMUM_TIMEOUT) {
 		snprintf (local_error_reason, sizeof(local_error_reason),
 			"The token timeout parameter (%d ms) may not be less than (%d ms).",
-			totem_config->token_timeout, MINIMUM_TIMEOUT);
+			(int)totem_config->token_timeout, MINIMUM_TIMEOUT);
 		goto parse_error;
 	}
 
@@ -409,7 +409,7 @@ int totem_volatile_config_validate (
 	if (totem_config->token_warning > 100 || totem_config->token_warning < 0) {
 		snprintf (local_error_reason, sizeof(local_error_reason),
 			"The token warning parameter (%d%%) must be between 0 (disabled) and 100.",
-			totem_config->token_warning);
+			(int)totem_config->token_warning);
 		goto parse_error;
 	}
 
@@ -417,7 +417,7 @@ int totem_volatile_config_validate (
 		if (icmap_get_uint32_r(temp_map, "totem.token_retransmit", &tmp_config_value) == CS_OK) {
 			snprintf (local_error_reason, sizeof(local_error_reason),
 				"The token retransmit timeout parameter (%d ms) may not be less than (%d ms).",
-				totem_config->token_retransmit_timeout, MINIMUM_TIMEOUT);
+				(int)totem_config->token_retransmit_timeout, MINIMUM_TIMEOUT);
 			goto parse_error;
 		} else {
 			snprintf (local_error_reason, sizeof(local_error_reason),
@@ -429,42 +429,42 @@ int totem_volatile_config_validate (
 	if (totem_config->token_hold_timeout < MINIMUM_TIMEOUT_HOLD) {
 		snprintf (local_error_reason, sizeof(local_error_reason),
 			"The token hold timeout parameter (%d ms) may not be less than (%d ms).",
-			totem_config->token_hold_timeout, MINIMUM_TIMEOUT_HOLD);
+			(int)totem_config->token_hold_timeout, MINIMUM_TIMEOUT_HOLD);
 		goto parse_error;
 	}
 
 	if (totem_config->join_timeout < MINIMUM_TIMEOUT) {
 		snprintf (local_error_reason, sizeof(local_error_reason),
 			"The join timeout parameter (%d ms) may not be less than (%d ms).",
-			totem_config->join_timeout, MINIMUM_TIMEOUT);
+			(int)totem_config->join_timeout, MINIMUM_TIMEOUT);
 		goto parse_error;
 	}
 
 	if (totem_config->consensus_timeout < MINIMUM_TIMEOUT) {
 		snprintf (local_error_reason, sizeof(local_error_reason),
 			"The consensus timeout parameter (%d ms) may not be less than (%d ms).",
-			totem_config->consensus_timeout, MINIMUM_TIMEOUT);
+			(int)totem_config->consensus_timeout, MINIMUM_TIMEOUT);
 		goto parse_error;
 	}
 
 	if (totem_config->consensus_timeout < totem_config->join_timeout) {
 		snprintf (local_error_reason, sizeof(local_error_reason),
 			"The consensus timeout parameter (%d ms) may not be less than join timeout (%d ms).",
-			totem_config->consensus_timeout, totem_config->join_timeout);
+			(int)totem_config->consensus_timeout, (int)totem_config->join_timeout);
 		goto parse_error;
 	}
 
 	if (totem_config->merge_timeout < MINIMUM_TIMEOUT) {
 		snprintf (local_error_reason, sizeof(local_error_reason),
 			"The merge timeout parameter (%d ms) may not be less than (%d ms).",
-			totem_config->merge_timeout, MINIMUM_TIMEOUT);
+			(int)totem_config->merge_timeout, MINIMUM_TIMEOUT);
 		goto parse_error;
 	}
 
 	if (totem_config->downcheck_timeout < MINIMUM_TIMEOUT) {
 		snprintf (local_error_reason, sizeof(local_error_reason),
 			"The downcheck timeout parameter (%d ms) may not be less than (%d ms).",
-			totem_config->downcheck_timeout, MINIMUM_TIMEOUT);
+			(int)totem_config->downcheck_timeout, MINIMUM_TIMEOUT);
 		goto parse_error;
 	}
 
@@ -657,7 +657,7 @@ static int nodelist_byname(icmap_map_t map, const char *find_name, int strip_dom
 
 	iter = icmap_iter_init_r(map, "nodelist.node.");
 	while ((iter_key = icmap_iter_next(iter, NULL, NULL)) != NULL) {
-		res = sscanf(iter_key, "nodelist.node.%u.%s", &node_pos, name_str);
+		res = sscanf(iter_key, "nodelist.node.%u.%254s", &node_pos, name_str);
 		if (res != 2) {
 			continue;
 		}
@@ -864,9 +864,13 @@ static int find_local_node(icmap_map_t map, int use_cache)
 		struct addrinfo hints;
 		struct addrinfo *result = NULL, *rp = NULL;
 
-		res = sscanf(iter_key, "nodelist.node.%u.%s", &node_pos, name_str);
-		if (res != 2) {
-			continue;
+		{
+			unsigned int u_node_pos;
+			res = sscanf(iter_key, "nodelist.node.%u.%254s", &u_node_pos, name_str);
+			if (res != 2) {
+				continue;
+			}
+			node_pos = (int)u_node_pos;
 		}
 		/* 'ring0_addr' is allowed as a fallback, but 'name' will be found first
 		 * because the names are in alpha order.
@@ -1039,7 +1043,7 @@ static int check_for_duplicate_nodeids(
 
 	iter = icmap_iter_init("nodelist.node.");
 	while ((iter_key = icmap_iter_next(iter, NULL, NULL)) != NULL) {
-		res = sscanf(iter_key, "nodelist.node.%u.%s", &node_pos, tmp_key);
+		res = sscanf(iter_key, "nodelist.node.%u.%254s", &node_pos, tmp_key);
 		if (res != 2) {
 			continue;
 		}
@@ -1076,7 +1080,7 @@ static int check_for_duplicate_nodeids(
 		node_pos1 = 0;
 		subiter = icmap_iter_init("nodelist.node.");
 		while (((iter_key = icmap_iter_next(subiter, NULL, NULL)) != NULL) && (node_pos1 < node_pos)) {
-			res = sscanf(iter_key, "nodelist.node.%u.%s", &node_pos1, tmp_key);
+			res = sscanf(iter_key, "nodelist.node.%u.%254s", &node_pos1, tmp_key);
 			if ((res != 2) || (node_pos1 >= node_pos)) {
 				continue;
 			}
@@ -1246,7 +1250,7 @@ static void configure_link_params(struct totem_config *totem_config, icmap_map_t
 
 		log_printf(LOGSYS_LEVEL_DEBUG, "Configuring link %d params\n", i);
 
-		snprintf(tmp_key, ICMAP_KEYNAME_MAXLEN, "nodelist.node.%u.ring%u_addr", local_node_pos, i);
+		snprintf(tmp_key, ICMAP_KEYNAME_MAXLEN, "nodelist.node.%u.ring%u_addr", (unsigned int)local_node_pos, (unsigned int)i);
 		if (icmap_get_string_r(map, tmp_key, &addr_string) != CS_OK) {
 			continue;
 		}
@@ -1372,7 +1376,7 @@ static int put_nodelist_members_to_config(struct totem_config *totem_config, icm
 
 	iter = icmap_iter_init_r(map, "nodelist.node.");
 	while ((iter_key = icmap_iter_next(iter, NULL, NULL)) != NULL) {
-		res = sscanf(iter_key, "nodelist.node.%u.%s", &node_pos, tmp_key);
+		res = sscanf(iter_key, "nodelist.node.%u.%254s", &node_pos, tmp_key);
 		if (res != 2) {
 			continue;
 		}
@@ -1382,7 +1386,7 @@ static int put_nodelist_members_to_config(struct totem_config *totem_config, icm
 		}
 		last_node_pos = node_pos;
 
-		snprintf(tmp_key, ICMAP_KEYNAME_MAXLEN, "nodelist.node.%u.", node_pos);
+		snprintf(tmp_key, ICMAP_KEYNAME_MAXLEN, "nodelist.node.%u.", (unsigned int)node_pos);
 		iter2 = icmap_iter_init_r(map, tmp_key);
 		while ((iter_key2 = icmap_iter_next(iter2, NULL, NULL)) != NULL) {
 			unsigned int nodeid;
@@ -1393,7 +1397,7 @@ static int put_nodelist_members_to_config(struct totem_config *totem_config, icm
 				nodeid = 0;
 			}
 
-			res = sscanf(iter_key2, "nodelist.node.%u.ring%u%s", &node_pos, &linknumber, tmp_key2);
+			res = sscanf(iter_key2, "nodelist.node.%u.ring%u%254s", &node_pos, &linknumber, tmp_key2);
 			if (res != 3 || strcmp(tmp_key2, "_addr") != 0) {
 				continue;
 			}
@@ -1517,12 +1521,16 @@ static void config_convert_nodelist_to_interface(icmap_map_t map, struct totem_c
 		/*
 		 * We found node, so create interface section
 		 */
-		snprintf(tmp_key, ICMAP_KEYNAME_MAXLEN, "nodelist.node.%u.", node_pos);
+		snprintf(tmp_key, ICMAP_KEYNAME_MAXLEN, "nodelist.node.%u.", (unsigned int)node_pos);
 		iter = icmap_iter_init_r(map, tmp_key);
 		while ((iter_key = icmap_iter_next(iter, NULL, NULL)) != NULL) {
-			res = sscanf(iter_key, "nodelist.node.%u.ring%u%s", &node_pos, &linknumber, tmp_key2);
-			if (res != 3 || strcmp(tmp_key2, "_addr") != 0) {
-				continue ;
+			{
+				unsigned int u_node_pos;
+				res = sscanf(iter_key, "nodelist.node.%u.ring%u%254s", &u_node_pos, &linknumber, tmp_key2);
+				if (res != 3 || strcmp(tmp_key2, "_addr") != 0) {
+					continue ;
+				}
+				node_pos = (int)u_node_pos;
 			}
 
 			if (icmap_get_string_r(map, iter_key, &node_addr_str) != CS_OK) {
@@ -1577,7 +1585,7 @@ static int get_interface_params(struct totem_config *totem_config, icmap_map_t m
 
 	iter = icmap_iter_init_r(map, "totem.interface.");
 	while ((iter_key = icmap_iter_next(iter, NULL, NULL)) != NULL) {
-		res = sscanf(iter_key, "totem.interface.%[^.].%s", linknumber_key, tmp_key);
+		res = sscanf(iter_key, "totem.interface.%254[^.].%254s", linknumber_key, tmp_key);
 		if (res != 2) {
 			continue;
 		}
@@ -1930,7 +1938,7 @@ extern int totem_config_read (
 			if (!totem_config->interfaces[i].configured) {
 				continue;
 			}
-			snprintf(tmp_key, ICMAP_KEYNAME_MAXLEN, "totem.interface.%u.mcastaddr", i);
+			snprintf(tmp_key, ICMAP_KEYNAME_MAXLEN, "totem.interface.%u.mcastaddr", (unsigned int)i);
 			if (icmap_get_string(tmp_key, &str) == CS_OK) {
 				free(str);
 			} else {
@@ -1938,7 +1946,7 @@ extern int totem_config_read (
 				icmap_set_string(tmp_key, str);
 			}
 
-			snprintf(tmp_key, ICMAP_KEYNAME_MAXLEN, "totem.interface.%u.mcastport", i);
+			snprintf(tmp_key, ICMAP_KEYNAME_MAXLEN, "totem.interface.%u.mcastport", (unsigned int)i);
 			if (icmap_get_uint16(tmp_key, &u16) != CS_OK) {
 				icmap_set_uint16(tmp_key, totem_config->interfaces[i].ip_port);
 			}
@@ -1953,7 +1961,7 @@ extern int totem_config_read (
 			if (!totem_config->interfaces[i].configured) {
 				continue;
 			}
-			snprintf(tmp_key, ICMAP_KEYNAME_MAXLEN, "runtime.config.totem.interface.%u.mcastport", i);
+			snprintf(tmp_key, ICMAP_KEYNAME_MAXLEN, "runtime.config.totem.interface.%u.mcastport", (unsigned int)i);
 			icmap_set_uint16(tmp_key, totem_config->interfaces[i].ip_port);
 		}
 	}
@@ -1972,7 +1980,7 @@ extern int totem_config_read (
 
 			assert(totem_config->node_id == 0);
 
-			snprintf(tmp_key, ICMAP_KEYNAME_MAXLEN, "nodelist.node.%u.nodeid", local_node_pos);
+			snprintf(tmp_key, ICMAP_KEYNAME_MAXLEN, "nodelist.node.%u.nodeid", (unsigned int)local_node_pos);
 			(void)icmap_get_uint32(tmp_key, &totem_config->node_id);
 
 
@@ -1984,7 +1992,7 @@ extern int totem_config_read (
 			if ((totem_config->transport_number == TOTEM_TRANSPORT_UDP ||
 			     totem_config->transport_number == TOTEM_TRANSPORT_UDPU) && (!totem_config->node_id)) {
 
-				snprintf(tmp_key, ICMAP_KEYNAME_MAXLEN, "nodelist.node.%u.ring0_addr", local_node_pos);
+				snprintf(tmp_key, ICMAP_KEYNAME_MAXLEN, "nodelist.node.%u.ring0_addr", (unsigned int)local_node_pos);
 				icmap_get_string(tmp_key, &str);
 
 				totem_config->node_id = generate_nodeid(totem_config, str);
@@ -2070,36 +2078,36 @@ int totem_config_validate (
 			memcmp (&totem_config->interfaces[i].mcast_addr, &null_addr,
 				sizeof (struct totem_ip_address)) == 0) {
 		        snprintf (local_error_reason, sizeof(local_error_reason),
-					"No multicast address specified for interface %u", i);
+					"No multicast address specified for interface %u", (unsigned int)i);
 			goto parse_error;
 		}
 
 		if (totem_config->interfaces[i].ip_port == 0) {
 		        snprintf (local_error_reason, sizeof(local_error_reason),
-					"No multicast port specified for interface %u", i);
+					"No multicast port specified for interface %u", (unsigned int)i);
 			goto parse_error;
 		}
 
 		if (totem_config->interfaces[i].ttl > 255) {
 		        snprintf (local_error_reason, sizeof(local_error_reason),
-					"Invalid TTL (should be 0..255) for interface %u", i);
+					"Invalid TTL (should be 0..255) for interface %u", (unsigned int)i);
 			goto parse_error;
 		}
 		if (totem_config->transport_number != TOTEM_TRANSPORT_UDP &&
 		    totem_config->interfaces[i].ttl != 1) {
 		        snprintf (local_error_reason, sizeof(local_error_reason),
-					"Can only set ttl on multicast transport types for interface %u", i);
+					"Can only set ttl on multicast transport types for interface %u", (unsigned int)i);
 			goto parse_error;
 		}
 		if (totem_config->interfaces[i].knet_link_priority > 255) {
 		        snprintf (local_error_reason, sizeof(local_error_reason),
-					"Invalid link priority (should be 0..255) for interface %u", i);
+					"Invalid link priority (should be 0..255) for interface %u", (unsigned int)i);
 			goto parse_error;
 		}
 		if (totem_config->transport_number != TOTEM_TRANSPORT_KNET &&
 		    totem_config->interfaces[i].knet_link_priority != 1) {
 		        snprintf (local_error_reason, sizeof(local_error_reason),
-					"Can only set link priority on knet transport type for interface %u", i);
+					"Can only set link priority on knet transport type for interface %u", (unsigned int)i);
 			goto parse_error;
 		}
 

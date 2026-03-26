@@ -384,7 +384,7 @@ cs_error_t stats_map_get(const char *key_name,
 			stats_map_set_value(statinfo, &link_status, value, value_len, type);
 			break;
 		case STAT_IPCSC:
-			if (sscanf(key_name, "stats.ipcs.service%d.%d.%p", &service_id, &pid, &conn_ptr) != 3) {
+			if (sscanf(key_name, "stats.ipcs.service%d.%u.%p", &service_id, &pid, &conn_ptr) != 3) {
 				return CS_ERR_NOT_EXIST;
 			}
 			res = cs_ipcs_get_conn_stats(service_id, pid, conn_ptr, &ipcs_conn_stats);
@@ -398,7 +398,7 @@ cs_error_t stats_map_get(const char *key_name,
 			stats_map_set_value(statinfo, &ipcs_global_stats, value, value_len, type);
 			break;
 		case STAT_SCHEDMISS:
-			if (sscanf(key_name, SCHEDMISS_PREFIX ".%d", &sm_event) != 1) {
+			if (sscanf(key_name, SCHEDMISS_PREFIX ".%u", &sm_event) != 1) {
 				return CS_ERR_NOT_EXIST;
 			}
 
@@ -461,9 +461,9 @@ void stats_add_schedmiss_event(uint64_t timestamp, float delay)
 
 	/* If we've not run off the end then add an entry in the trie for the new 'end' one */
 	if (highest_schedmiss_event < MAX_SCHEDMISS_EVENTS) {
-		sprintf(param, SCHEDMISS_PREFIX ".%i.timestamp", highest_schedmiss_event);
+		sprintf(param, SCHEDMISS_PREFIX ".%u.timestamp", highest_schedmiss_event);
 		stats_add_entry(param, &cs_schedmiss_stats[0]);
-		sprintf(param, SCHEDMISS_PREFIX ".%i.delay", highest_schedmiss_event);
+		sprintf(param, SCHEDMISS_PREFIX ".%u.delay", highest_schedmiss_event);
 		stats_add_entry(param, &cs_schedmiss_stats[1]);
 		highest_schedmiss_event++;
 	}
@@ -768,7 +768,7 @@ void stats_ipcs_add_connection(int service_id, uint32_t pid, void *ptr)
 	char param[ICMAP_KEYNAME_MAXLEN];
 
 	for (i = 0; i<NUM_IPCSC_STATS; i++) {
-		sprintf(param, "stats.ipcs.service%d.%d.%p.%s", service_id, pid, ptr, cs_ipcs_conn_stats[i].name);
+		sprintf(param, "stats.ipcs.service%d.%u.%p.%s", service_id, pid, ptr, cs_ipcs_conn_stats[i].name);
 		stats_add_entry(param, &cs_ipcs_conn_stats[i]);
 	}
 }
@@ -778,7 +778,7 @@ void stats_ipcs_del_connection(int service_id, uint32_t pid, void *ptr)
 	char param[ICMAP_KEYNAME_MAXLEN];
 
 	for (i = 0; i<NUM_IPCSC_STATS; i++) {
-		sprintf(param, "stats.ipcs.service%d.%d.%p.%s", service_id, pid, ptr, cs_ipcs_conn_stats[i].name);
+		sprintf(param, "stats.ipcs.service%d.%u.%p.%s", service_id, pid, ptr, cs_ipcs_conn_stats[i].name);
 		stats_rm_entry(param);
 	}
 }

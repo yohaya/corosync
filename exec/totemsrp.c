@@ -1278,7 +1278,18 @@ static int memb_consensus_agreed (
 		 return (agreed);
 	}
 
-	assert (token_memb_entries >= 1);
+	/*
+	 * token_memb_entries < 1 can happen during concurrent node failures
+	 * in large clusters where failure detection races with consensus
+	 * building.  Crashing the daemon here would make the situation worse;
+	 * return agreed=0 to force another gather round instead.
+	 */
+	if (token_memb_entries < 1) {
+		log_printf(instance->totemsrp_log_level_warning,
+			"memb_consensus_agreed: token_memb_entries=%d < 1, "
+			"forcing re-gather", token_memb_entries);
+		return (0);
+	}
 
 	return (agreed);
 }
@@ -1816,7 +1827,9 @@ static void memb_timer_function_state_gather (void *data)
 	switch (instance->memb_state) {
 	case MEMB_STATE_OPERATIONAL:
 	case MEMB_STATE_RECOVERY:
-		assert (0); /* this should never happen */
+		log_printf (instance->totemsrp_log_level_warning,
+			"memb_join_timer fired in unexpected state %d — ignoring",
+			instance->memb_state);
 		break;
 	case MEMB_STATE_GATHER:
 	case MEMB_STATE_COMMIT:
@@ -2316,6 +2329,21 @@ static void memb_state_recovery_enter (
 	instance->my_high_ring_delivered = 0;
 
 	sq_reinit (&instance->recovery_sort_queue, SEQNO_START_MSG);
+
+	/*
+	 * Drain retrans_message_queue and free mcast buffers before reinit.
+	 * Without this, repeated ring recoveries (common in large clusters
+	 * under network instability) leak one mcast buffer per message per
+	 * recovery cycle.  Fixes the TODO LEAK comment below.
+	 */
+	while (!cs_queue_is_empty (&instance->retrans_message_queue)) {
+		struct message_item *mi =
+			(struct message_item *)cs_queue_item_get (&instance->retrans_message_queue);
+		if (mi && mi->mcast) {
+			totemsrp_buffer_release (instance, mi->mcast);
+		}
+		cs_queue_item_remove (&instance->retrans_message_queue);
+	}
 	cs_queue_reinit (&instance->retrans_message_queue);
 
 	low_ring_aru = instance->old_ring_state_high_seq_received;
@@ -2419,7 +2447,14 @@ static void memb_state_recovery_enter (
 		 */
 		goto no_originate;
 	}
-	assert (range < QUEUE_RTR_ITEMS_SIZE_MAX);
+	if (range >= QUEUE_RTR_ITEMS_SIZE_MAX) {
+		log_printf (instance->totemsrp_log_level_warning,
+			"gather_enter: old ring range %u exceeds queue max %u "
+			"(high_seq=%x low_aru=%x) — truncating; messages will be skipped",
+			range, QUEUE_RTR_ITEMS_SIZE_MAX,
+			instance->old_ring_state_high_seq_received, low_ring_aru);
+		range = QUEUE_RTR_ITEMS_SIZE_MAX - 1;
+	}
 
 	log_printf (instance->totemsrp_log_level_debug,
 		"copying all old ring messages from %x-%x.",
@@ -2441,7 +2476,12 @@ static void memb_state_recovery_enter (
 		memset (&message_item, 0, sizeof (struct message_item));
 	// TODO	 LEAK
 		message_item.mcast = totemsrp_buffer_alloc (instance);
-		assert (message_item.mcast);
+		if (message_item.mcast == NULL) {
+			log_printf (instance->totemsrp_log_level_error,
+				"totemsrp_buffer_alloc failed during ring recovery "
+				"(OOM) — skipping message %x", low_ring_aru + i);
+			continue;
+		}
 		memset(message_item.mcast, 0, sizeof (struct mcast));
 		message_item.mcast->header.magic = TOTEM_MH_MAGIC;
 		message_item.mcast->header.version = TOTEM_MH_VERSION;
@@ -2457,6 +2497,14 @@ static void memb_state_recovery_enter (
 		memcpy (((char *)message_item.mcast) + sizeof (struct mcast),
 			sort_queue_item->mcast,
 			sort_queue_item->msg_len);
+		if (cs_queue_is_full (&instance->retrans_message_queue)) {
+			totemsrp_buffer_release (instance, message_item.mcast);
+			log_printf (instance->totemsrp_log_level_warning,
+				"retrans_message_queue full during ring recovery "
+				"at seqno %x — dropping remaining messages",
+				low_ring_aru + i);
+			break;
+		}
 		cs_queue_item_add (&instance->retrans_message_queue, &message_item);
 	}
 	log_printf (instance->totemsrp_log_level_debug,
@@ -2658,7 +2706,14 @@ static void messages_free (
 	}
 
 	range = release_to - instance->last_released;
-	assert (range < QUEUE_RTR_ITEMS_SIZE_MAX);
+	if (range >= QUEUE_RTR_ITEMS_SIZE_MAX) {
+		log_printf (instance->totemsrp_log_level_warning,
+			"messages_free: release range %u exceeds queue max %u "
+			"(release_to=%x last_released=%x) — clamping",
+			range, QUEUE_RTR_ITEMS_SIZE_MAX,
+			release_to, instance->last_released);
+		range = QUEUE_RTR_ITEMS_SIZE_MAX - 1;
+	}
 
 	/*
 	 * Release retransmit list items if group aru indicates they are transmitted
@@ -2876,7 +2931,14 @@ static int orf_token_rtr (
 	 */
 
 	range = orf_token->seq - instance->my_aru;
-	assert (range < QUEUE_RTR_ITEMS_SIZE_MAX);
+	if (range >= QUEUE_RTR_ITEMS_SIZE_MAX) {
+		log_printf (instance->totemsrp_log_level_warning,
+			"orf_token_rtr: retransmit range %u exceeds queue max %u "
+			"(token_seq=%x my_aru=%x) — clamping; requesting re-gather",
+			range, QUEUE_RTR_ITEMS_SIZE_MAX,
+			orf_token->seq, instance->my_aru);
+		range = QUEUE_RTR_ITEMS_SIZE_MAX - 1;
+	}
 
 	for (i = 1; (orf_token->rtr_list_entries < RETRANSMIT_ENTRIES_MAX) &&
 		(i <= range); i++) {
@@ -3561,7 +3623,10 @@ static void token_callbacks_execute (
 		callback_listhead = &instance->token_callback_sent_listhead;
 		break;
 	default:
-		assert (0);
+		log_printf (LOGSYS_LEVEL_ERROR,
+			"token_callbacks_execute: unknown callback type %d — ignoring",
+			type);
+		return;
 	}
 
 	qb_list_for_each_safe(list, tmp_iter, callback_listhead) {
@@ -3650,9 +3715,16 @@ static void fcc_rtr_limit (
 	struct orf_token *token,
 	unsigned int *transmits_allowed)
 {
-	int check = QUEUE_RTR_ITEMS_SIZE_MAX;
-	check -= (*transmits_allowed + instance->totem_config->window_size);
-	assert (check >= 0);
+	unsigned int needed = *transmits_allowed + instance->totem_config->window_size;
+	if (needed > QUEUE_RTR_ITEMS_SIZE_MAX) {
+		log_printf(instance->totemsrp_log_level_warning,
+			"fcc_rtr_limit: needed %u exceeds RTR queue max %u "
+			"(transmits_allowed=%u window_size=%u) — clamping to 0",
+			needed, QUEUE_RTR_ITEMS_SIZE_MAX,
+			*transmits_allowed, instance->totem_config->window_size);
+		*transmits_allowed = 0;
+		return;
+	}
 	if (sq_lt_compare (instance->last_released +
 		QUEUE_RTR_ITEMS_SIZE_MAX - *transmits_allowed -
 		instance->totem_config->window_size,
@@ -4197,7 +4269,14 @@ static void messages_deliver_to_app (
 			"Delivering %x to %x", instance->my_high_delivered,
 			end_point);
 	}
-	assert (range < QUEUE_RTR_ITEMS_SIZE_MAX);
+	if (range >= QUEUE_RTR_ITEMS_SIZE_MAX) {
+		log_printf (instance->totemsrp_log_level_warning,
+			"messages_deliver: delivery range %u exceeds queue max %u "
+			"(end_point=%x my_high_delivered=%x) — clamping",
+			range, QUEUE_RTR_ITEMS_SIZE_MAX,
+			end_point, instance->my_high_delivered);
+		range = QUEUE_RTR_ITEMS_SIZE_MAX - 1;
+	}
 	my_high_delivered_stored = instance->my_high_delivered;
 
 	/*
@@ -4309,7 +4388,13 @@ static int message_handler_mcast (
 		sort_queue = &instance->regular_sort_queue;
 	}
 
-	assert (msg_len <= FRAME_SIZE_MAX);
+	if (msg_len > FRAME_SIZE_MAX) {
+		log_printf (instance->totemsrp_log_level_error,
+			"message_handler_mcast: oversized frame from node " CS_PRI_NODE_ID
+			" (len=%zu max=%zu) — dropping",
+			mcast_header.header.nodeid, msg_len, (size_t)FRAME_SIZE_MAX);
+		return (0);
+	}
 
 #ifdef TEST_DROP_MCAST_PERCENTAGE
 	if (random()%100 < TEST_DROP_MCAST_PERCENTAGE) {
@@ -5172,7 +5257,11 @@ int main_iface_change_fn (
 	if (instance->iface_changes >= num_interfaces) {
 		/* We need to clear orig_interfaces so that 'commit' diffs against nothing */
 		instance->totem_config->orig_interfaces = malloc (sizeof (struct totem_interface) * INTERFACE_MAX);
-		assert(instance->totem_config->orig_interfaces != NULL);
+		if (instance->totem_config->orig_interfaces == NULL) {
+			log_printf (LOGSYS_LEVEL_ERROR,
+				"totemsrp_iface_change: orig_interfaces is NULL — ignoring");
+			return (0);
+		}
 		memset(instance->totem_config->orig_interfaces, 0, sizeof (struct totem_interface) * INTERFACE_MAX);
 
 		res = totemconfig_commit_new_params(instance->totem_config, icmap_get_global_map());

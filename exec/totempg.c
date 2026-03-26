@@ -1525,7 +1525,7 @@ const char *totempg_ifaces_print (unsigned int nodeid)
 			continue;
 		}
 		snprintf (one_iface, ONE_IFACE_LEN,
-			  "r(%d) ip(%s) ",
+			  "r(%u) ip(%s) ",
 			  i, totemip_print (&interfaces[i]));
 		strcat (iface_string, one_iface);
 	}

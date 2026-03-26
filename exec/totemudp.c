@@ -1308,7 +1308,6 @@ int totemudp_nodestatus_get (void *udp_context, unsigned int nodeid,
 		if (member->member.nodeid == nodeid) {
 			node_status->nodeid = nodeid;
 			/* reachable is filled in by totemsrp */
-			node_status->link_status[0].enabled = 1;
 			if (instance->netif_bind_state == BIND_STATE_REGULAR) {
 				node_status->link_status[0].enabled = 1;
 			} else {

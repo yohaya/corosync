@@ -627,9 +627,11 @@ static int notify_lib_totem_membership (
 
 	size = sizeof(struct res_lib_cpg_totem_confchg_callback) +
 		sizeof(mar_uint32_t) * (member_list_entries);
-	buf = alloca(size);
-	if (!buf)
+	buf = malloc(size);
+	if (!buf) {
+		log_printf (LOGSYS_LEVEL_ERROR, "malloc(%d) failed in notify_lib_totem_membership", size);
 		return CS_ERR_LIBRARY;
+	}
 
 	res = (struct res_lib_cpg_totem_confchg_callback *)buf;
 	res->member_list_entries = member_list_entries;
@@ -649,6 +651,7 @@ static int notify_lib_totem_membership (
 		api->ipc_dispatch_send (conn, buf, size);
 	}
 
+	free(buf);
 	return CS_OK;
 }
 
@@ -727,9 +730,11 @@ static int notify_lib_joinlist(
 
 	size = sizeof(struct res_lib_cpg_confchg_callback) +
 		sizeof(mar_cpg_address_t) * (member_list_entries + left_list_entries + joined_list_entries);
-	buf = alloca(size);
-	if (!buf)
+	buf = malloc(size);
+	if (!buf) {
+		log_printf (LOGSYS_LEVEL_ERROR, "malloc(%d) failed in notify_lib_joinlist", size);
 		return CS_ERR_LIBRARY;
+	}
 
 	res = (struct res_lib_cpg_confchg_callback *)buf;
 	res->joined_list_entries = joined_list_entries;
@@ -829,6 +834,7 @@ static int notify_lib_joinlist(
 		}
 	}
 
+	free(buf);
 	return CS_OK;
 }
 
@@ -1348,6 +1354,12 @@ static void message_handler_req_exec_cpg_joinlist (
 
 	while ((const char*)jle < message + res->size) {
 		stored_msg = malloc (sizeof (struct joinlist_msg));
+		if (stored_msg == NULL) {
+			log_printf (LOGSYS_LEVEL_ERROR,
+				"malloc failed for joinlist_msg — dropping entry from node " CS_PRI_NODE_ID,
+				nodeid);
+			break;
+		}
 		memset(stored_msg, 0, sizeof (struct joinlist_msg));
 		stored_msg->sender_nodeid = nodeid;
 		stored_msg->pid = jle->pid;
@@ -1510,9 +1522,9 @@ static int cpg_exec_send_joinlist(void)
 		return 0;
 
 	buf_size = sizeof(struct qb_ipc_response_header) + sizeof(struct join_list_entry) * count;
-	buf = alloca(buf_size);
+	buf = malloc(buf_size);
 	if (!buf) {
-		log_printf(LOGSYS_LEVEL_WARNING, "Unable to allocate joinlist buffer");
+		log_printf(LOGSYS_LEVEL_ERROR, "malloc(%zu) failed in cpg_exec_send_joinlist", buf_size);
 		return -1;
 	}
 	memset(buf, 0, buf_size);
@@ -1536,7 +1548,9 @@ static int cpg_exec_send_joinlist(void)
 	req_exec_cpg_iovec.iov_base = buf;
 	req_exec_cpg_iovec.iov_len = res->size;
 
-	return (api->totem_mcast (&req_exec_cpg_iovec, 1, TOTEM_AGREED));
+	int ret = api->totem_mcast (&req_exec_cpg_iovec, 1, TOTEM_AGREED);
+	free(buf);
+	return ret;
 }
 
 static int cpg_lib_init_fn (void *conn)
