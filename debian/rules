@@ -28,7 +28,7 @@ override_dh_auto_configure:
 		--with-logdir=/var/log/corosync
 
 override_dh_installsystemd:
-	dh_installsystemd --name=corosync corosync.service
+	dh_installsystemd -p corosync --name=corosync corosync.service
 
 override_dh_strip:
 	dh_strip --dbgsym-migration='corosync-dbg (<< 3.1.10~)'
