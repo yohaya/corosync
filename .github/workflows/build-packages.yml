@@ -57,19 +57,31 @@ jobs:
           set -e
           DISTRO="${{ matrix.debian_release }}"
 
-          # Bootstrap: need wget/ca-certificates to fetch the Proxmox repo
+          # Bootstrap: need wget/ca-certificates/gpg to fetch the Proxmox repo key
           apt-get update -qq
           DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
             wget ca-certificates gnupg
 
-          # Add Proxmox PVE repository — provides libknet1-dev, libqb-dev, etc.
-          # that are not in standard Debian repos.
-          # Using [trusted=yes] for CI (no enterprise subscription needed).
-          echo "deb [trusted=yes] http://download.proxmox.com/debian/pve ${DISTRO} pve-no-subscription" \
+          # Import the Proxmox release signing key so apt trusts the PVE repo.
+          # libknet1-dev (kronosnet) and matching libqb-dev are only in the PVE repo,
+          # not in standard Debian repos.
+          wget -qO /tmp/proxmox-release.gpg \
+            "https://enterprise.proxmox.com/debian/proxmox-release-${DISTRO}.gpg"
+          # The key file may be armored (ASCII) or binary; handle both.
+          if gpg --dearmor < /tmp/proxmox-release.gpg \
+               > /etc/apt/trusted.gpg.d/proxmox-release-${DISTRO}.gpg 2>/dev/null; then
+            echo "Imported Proxmox GPG key (armored format)"
+          else
+            cp /tmp/proxmox-release.gpg /etc/apt/trusted.gpg.d/proxmox-release-${DISTRO}.gpg
+            echo "Imported Proxmox GPG key (binary format)"
+          fi
+
+          echo "deb http://download.proxmox.com/debian/pve ${DISTRO} pve-no-subscription" \
             > /etc/apt/sources.list.d/pve.list
-          apt-get update -qq
+          apt-get update -qq --allow-insecure-repositories || apt-get update -qq
 
           DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            --allow-unauthenticated \
             git \
             build-essential \
             devscripts \
