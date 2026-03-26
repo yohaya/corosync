@@ -76,9 +76,17 @@ jobs:
             echo "Imported Proxmox GPG key (binary format)"
           fi
 
+          # Add pve-no-subscription AND pvetest repos for maximum package coverage
           echo "deb http://download.proxmox.com/debian/pve ${DISTRO} pve-no-subscription" \
             > /etc/apt/sources.list.d/pve.list
-          apt-get update -qq --allow-insecure-repositories || apt-get update -qq
+          echo "deb http://download.proxmox.com/debian/pvetest ${DISTRO} pvetest" \
+            >> /etc/apt/sources.list.d/pve.list
+          apt-get update -qq --allow-insecure-repositories 2>&1 | tail -5 || apt-get update -qq
+
+          echo "--- knet packages available ---"
+          apt-cache search knet || true
+          echo "--- libknet packages ---"
+          apt-cache search libknet || true
 
           DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
             --allow-unauthenticated \
