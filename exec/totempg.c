@@ -213,9 +213,14 @@ static int callback_token_received_fn (enum totem_callback_token_type type,
 QB_LIST_DECLARE(assembly_list_inuse);
 
 /*
- * Free list is used both for transitional and operational assemblies
+ * Free list is used both for transitional and operational assemblies.
+ * Capped at ASSEMBLY_FREE_LIST_MAX to prevent unbounded ~1MB-per-entry
+ * growth across repeated ring-recovery cycles (root cause of multi-GiB
+ * RSS seen in large clusters).
  */
+#define ASSEMBLY_FREE_LIST_MAX 8
 QB_LIST_DECLARE(assembly_list_free);
+static int assembly_list_free_entries = 0;
 
 QB_LIST_DECLARE(assembly_list_inuse_trans);
 
@@ -316,6 +321,7 @@ static struct assembly *assembly_ref (unsigned int nodeid)
 	if (qb_list_empty (&assembly_list_free) == 0) {
 		assembly = qb_list_first_entry (&assembly_list_free, struct assembly, list);
 		qb_list_del (&assembly->list);
+		assembly_list_free_entries--;
 		qb_list_add (&assembly->list, active_assembly_list_inuse);
 		assembly->nodeid = nodeid;
 		assembly->index = 0;
@@ -346,7 +352,17 @@ static struct assembly *assembly_ref (unsigned int nodeid)
 static void assembly_deref (struct assembly *assembly)
 {
 	qb_list_del (&assembly->list);
-	qb_list_add (&assembly->list, &assembly_list_free);
+	if (assembly_list_free_entries >= ASSEMBLY_FREE_LIST_MAX) {
+		/*
+		 * Free list is full.  Freeing this assembly directly prevents
+		 * unbounded accumulation of ~1MB buffers across ring-recovery
+		 * cycles (each recovery can add PROCESSOR_COUNT_MAX entries).
+		 */
+		free (assembly);
+	} else {
+		qb_list_add (&assembly->list, &assembly_list_free);
+		assembly_list_free_entries++;
+	}
 }
 
 static void assembly_deref_from_normal_and_trans (int nodeid)
@@ -367,8 +383,7 @@ static void assembly_deref_from_normal_and_trans (int nodeid)
 			assembly = qb_list_entry (list, struct assembly, list);
 
 			if (nodeid == assembly->nodeid) {
-				qb_list_del (&assembly->list);
-				qb_list_add (&assembly->list, &assembly_list_free);
+				assembly_deref (assembly);
 			}
 		}
 	}
