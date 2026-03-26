@@ -83,10 +83,11 @@ jobs:
             >> /etc/apt/sources.list.d/pve.list
           apt-get update -qq --allow-insecure-repositories 2>&1 | tail -5 || apt-get update -qq
 
-          echo "--- knet packages available ---"
-          apt-cache search knet || true
-          echo "--- libknet packages ---"
-          apt-cache search libknet || true
+          # In the Proxmox PVE repo the dev package is named libknet-dev (no soversion
+          # suffix), while the runtime is libknet1.  Try both names for compatibility.
+          KNET_DEV=$(apt-cache show libknet-dev 2>/dev/null | head -1 | grep -q Package \
+                     && echo libknet-dev || echo libknet1-dev)
+          echo "Using knet dev package: ${KNET_DEV}"
 
           DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
             --allow-unauthenticated \
@@ -100,14 +101,14 @@ jobs:
             libtool \
             pkg-config \
             libqb-dev \
-            libknet1-dev \
+            "${KNET_DEV}" \
             zlib1g-dev \
             groff \
             docbook2x \
             libxml2-utils \
             xsltproc \
             lsb-release
-          dpkg -l libqb-dev libknet1-dev | tail -3
+          dpkg -l libqb-dev "${KNET_DEV}" | tail -3
 
       - name: Checkout source
         uses: actions/checkout@v4
