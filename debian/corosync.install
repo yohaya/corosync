@@ -6,7 +6,6 @@ usr/sbin/corosync-quorumtool
 usr/sbin/corosync-keygen
 usr/sbin/corosync-notifyd
 usr/bin/corosync-blackbox
-usr/bin/corosync-vqsim
 etc/corosync/
 etc/logrotate.d/corosync
 lib/systemd/system/corosync.service
