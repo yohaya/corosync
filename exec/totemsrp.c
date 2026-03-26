@@ -2999,17 +2999,32 @@ static int orf_token_mcast (
 		/*
 		 * Add message to retransmit queue
 		 */
-		sq_item_add (sort_queue, &sort_queue_item, message_item->mcast->seq);
+		{
+			void *sq_res = sq_item_add (sort_queue, &sort_queue_item,
+			    message_item->mcast->seq);
 
-		totemnet_mcast_noflush_send (
-			instance->totemnet_context,
-			message_item->mcast,
-			message_item->msg_len);
+			totemnet_mcast_noflush_send (
+				instance->totemnet_context,
+				message_item->mcast,
+				message_item->msg_len);
 
-		/*
-		 * Delete item from pending queue
-		 */
-		cs_queue_item_remove (mcast_queue);
+			/*
+			 * Delete item from pending queue
+			 */
+			cs_queue_item_remove (mcast_queue);
+
+			if (sq_res == NULL) {
+				/* BUG-12: sort queue full or duplicate seqno — message was
+				 * sent but cannot be retransmitted.  Release buffer now
+				 * since messages_free() will never find it in the sort queue. */
+				log_printf (instance->totemsrp_log_level_error,
+				    "orf_token_mcast: sq_item_add failed for seq=%x "
+				    "(sort queue overflow or duplicate) — "
+				    "message unretransmittable, releasing buffer",
+				    message_item->mcast->seq);
+				totemsrp_buffer_release (instance, sort_queue_item.mcast);
+			}
+		}
 
 		/*
 		 * If messages mcasted, deliver any new messages to totempg
@@ -5006,7 +5021,6 @@ static int message_handler_mcast (
 		/*
 		 * Allocate new multicast memory block
 		 */
-// TODO LEAK
 		sort_queue_item.mcast = totemsrp_buffer_alloc (instance);
 		if (sort_queue_item.mcast == NULL) {
 			return (-1); /* error here is corrected by the algorithm */
@@ -5019,7 +5033,11 @@ static int message_handler_mcast (
 			instance->my_high_seq_received = mcast_header.seq;
 		}
 
-		sq_item_add (sort_queue, &sort_queue_item, mcast_header.seq);
+		/* BUG-13: check sq_item_add return — if NULL (sort queue overflow or
+		 * duplicate), release the buffer we just allocated to avoid a leak. */
+		if (sq_item_add (sort_queue, &sort_queue_item, mcast_header.seq) == NULL) {
+			totemsrp_buffer_release (instance, sort_queue_item.mcast);
+		}
 	}
 
 	update_aru (instance);
