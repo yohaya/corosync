@@ -70,15 +70,3 @@ Description: Standards-based cluster framework (developer files)
  This package contains header files required to build applications that
  use the Corosync libraries.
 
-Package: corosync-qdevice
-Architecture: linux-any
-Depends:
- ${shlibs:Depends},
- ${misc:Depends},
- libcorosync-common4 (= ${binary:Version}),
- corosync (= ${binary:Version}),
-Description: Standards-based cluster framework (QDevice daemon)
- Corosync is a group communication system with features for implementing
- high availability within applications.
- .
- This package contains the Corosync QDevice daemon and utilities.

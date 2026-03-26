@@ -5,7 +5,7 @@ usr/sbin/corosync-cpgtool
 usr/sbin/corosync-quorumtool
 usr/sbin/corosync-keygen
 usr/sbin/corosync-notifyd
-usr/sbin/corosync-blackbox
+usr/bin/corosync-blackbox
 etc/corosync/
 lib/systemd/system/corosync.service
 usr/share/man/man8/corosync.8*
@@ -16,4 +16,3 @@ usr/share/man/man8/corosync-quorumtool.8*
 usr/share/man/man8/corosync-keygen.8*
 usr/share/man/man8/corosync-notifyd.8*
 usr/share/man/man5/corosync.conf.5*
-usr/share/corosync/

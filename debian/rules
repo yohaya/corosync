@@ -19,8 +19,8 @@ override_dh_auto_configure:
 		--sysconfdir=/etc \
 		--localstatedir=/var \
 		--with-initscriptdir=/etc/init.d \
-		--with-systemd \
 		--enable-systemd \
+		--with-systemddir=/lib/systemd/system \
 		--disable-dbus \
 		--disable-nozzle \
 		--enable-watchdog \
