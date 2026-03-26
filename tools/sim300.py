@@ -1167,6 +1167,12 @@ def main():
     p.add_argument("--seconds",    type=int,   default=SIMULATION_SECONDS)
     p.add_argument("--seed",       type=int,   default=42)
     p.add_argument("--quiet",      action="store_true")
+    p.add_argument("--rtr-max",    type=int,   default=None,
+                   help="override RETRANSMIT_ENTRIES_MAX (fork default: 256, orig: 30)")
+    p.add_argument("--window-size", type=int,  default=None,
+                   help="override WINDOW_SIZE (fork default: 300, orig: 50)")
+    p.add_argument("--fixed",      action="store_true",
+                   help="apply all fork fixes: rtr-max=256 window-size=300")
     args = p.parse_args()
 
     if args.stress:
@@ -1178,6 +1184,17 @@ def main():
         _mod = _sys.modules[__name__]
         _mod.LATENCY_MIN_MS = max(0.0, args.latency * 0.8)
         _mod.LATENCY_MAX_MS = args.latency * 1.2
+    if args.fixed:
+        if args.rtr_max is None:
+            args.rtr_max = 256
+        if args.window_size is None:
+            args.window_size = 300
+    if args.rtr_max is not None:
+        global RETRANSMIT_ENTRIES_MAX
+        RETRANSMIT_ENTRIES_MAX = args.rtr_max
+    if args.window_size is not None:
+        global WINDOW_SIZE
+        WINDOW_SIZE = args.window_size
 
     run_simulation(args)
 

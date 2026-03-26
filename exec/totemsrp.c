@@ -103,14 +103,17 @@
  * token pass.  Excess RTR requests are silently dropped, causing O(N/30)
  * delivery latency growth (10x slower for a 300-node cluster).
  *
- * The token frame has TOKEN_SIZE_MAX=64000 bytes of budget.
- * Each rtr_item = 8 bytes.  256 entries = 2048 bytes — trivial overhead.
- * The token_storage local buffer in message_handler_orf_token is enlarged
- * to 4096 bytes to accommodate the larger RTR list.
+ * Each rtr_item = sizeof(struct memb_ring_id) + sizeof(unsigned int) = 16 bytes.
+ * PROCESSOR_COUNT_MAX=384 entries = 384 × 16 = 6144 bytes of RTR payload.
+ * Setting RETRANSMIT_ENTRIES_MAX = PROCESSOR_COUNT_MAX ensures every supported
+ * cluster size gets full per-rotation RTR coverage.
  *
- * This value should be ≥ PROCESSOR_COUNT_MAX/4 for large deployments.
+ * TOKEN_STORAGE_BYTES is the exact buffer size needed:
+ *   struct orf_token header ≈ 57 bytes (packed) + RTR entries.
+ *   Use 8192 (generous power-of-two, ~2KB headroom) for token_storage/token_convert.
  */
-#define RETRANSMIT_ENTRIES_MAX			256
+#define RETRANSMIT_ENTRIES_MAX			384
+#define TOKEN_STORAGE_BYTES			8192
 #define TOKEN_SIZE_MAX				64000 /* bytes */
 #define LEAVE_DUMMY_NODEID                      0
 
@@ -2229,8 +2232,8 @@ static void memb_state_operational_enter (struct totemsrp_instance *instance)
 
 	/*
 	 * Dynamic RTR sizing: give every member at least one RTR slot per
-	 * token pass.  Capped at RETRANSMIT_ENTRIES_MAX (256) so the token
-	 * frame stays within TOKEN_SIZE_MAX.
+	 * token pass.  Capped at RETRANSMIT_ENTRIES_MAX (=PROCESSOR_COUNT_MAX=384)
+	 * so clusters up to 384 nodes get full per-rotation RTR coverage.
 	 * Also emit a DIAG advisory when window_size is likely too small for
 	 * the current ring size at max throughput:
 	 *   msgs_per_rotation_max = max_messages × members
@@ -4081,6 +4084,13 @@ static int check_memb_join_sanity(
 		failed_list_entries = swab32(failed_list_entries);
 	}
 
+	if (proc_list_entries > PROCESSOR_COUNT_MAX || failed_list_entries > PROCESSOR_COUNT_MAX) {
+		log_printf (instance->totemsrp_log_level_security,
+		    "Received memb_join with proc_list_entries=%u or failed_list_entries=%u > PROCESSOR_COUNT_MAX=%u - ignoring.",
+		    proc_list_entries, failed_list_entries, PROCESSOR_COUNT_MAX);
+		return (-1);
+	}
+
 	required_len = sizeof(struct memb_join) + ((proc_list_entries + failed_list_entries) * sizeof(struct srp_addr));
 	if (msg_len < required_len) {
 		log_printf (instance->totemsrp_log_level_security,
@@ -4117,6 +4127,13 @@ static int check_memb_commit_token_sanity(
 	addr_entries= mct_msg->addr_entries;
 	if (endian_conversion_needed) {
 		addr_entries = swab32(addr_entries);
+	}
+
+	if (addr_entries > PROCESSOR_COUNT_MAX) {
+		log_printf (instance->totemsrp_log_level_security,
+		    "Received memb_commit_token with addr_entries=%u > PROCESSOR_COUNT_MAX=%u - ignoring.",
+		    addr_entries, PROCESSOR_COUNT_MAX);
+		return (-1);
 	}
 
 	required_len = sizeof(struct memb_commit_token) +
@@ -4164,16 +4181,14 @@ static int message_handler_orf_token (
 	size_t msg_len,
 	int endian_conversion_needed)
 {
-	/* Sized for orf_token header (~40B) + 256 rtr_items × 8B = ~2088B */
-	char token_storage[4096];
 	/*
-	 * token_convert must be the same size as token_storage: both hold
-	 * a full orf_token with up to RETRANSMIT_ENTRIES_MAX RTR entries.
-	 * The old 1500-byte size was a regression introduced when
-	 * RETRANSMIT_ENTRIES_MAX was increased from 30 to 256 — a token
-	 * with 256 entries is 2088B, which would overflow 1500B.
+	 * Sized for orf_token header (57B packed) + RETRANSMIT_ENTRIES_MAX rtr_items.
+	 * struct rtr_item = 16B (ring_id=12B + seq=4B).
+	 * 384 entries × 16B = 6144B + 57B header = 6201B → use TOKEN_STORAGE_BYTES=8192.
+	 * Both buffers must be the same size (token_convert holds the endian-swapped copy).
 	 */
-	char token_convert[4096];
+	char token_storage[TOKEN_STORAGE_BYTES];
+	char token_convert[TOKEN_STORAGE_BYTES];
 	struct orf_token *token = NULL;
 	int forward_token;
 	unsigned int transmits_allowed;
@@ -5246,10 +5261,18 @@ static int message_handler_memb_join (
 	int endian_conversion_needed)
 {
 	const struct memb_join *memb_join;
-	struct memb_join *memb_join_convert = alloca (msg_len);
+	struct memb_join *memb_join_convert;
 	struct srp_addr aligned_system_from;
 
+	memb_join_convert = malloc (msg_len);
+	if (memb_join_convert == NULL) {
+		log_printf (instance->totemsrp_log_level_warning,
+		    "out of memory in message_handler_memb_join - ignoring message");
+		return (0);
+	}
+
 	if (check_memb_join_sanity(instance, msg, msg_len, endian_conversion_needed) == -1) {
+		free (memb_join_convert);
 		return (0);
 	}
 
@@ -5269,6 +5292,7 @@ static int message_handler_memb_join (
 	 * entries
 	 */
 	if (pause_flush (instance)) {
+		free (memb_join_convert);
 		return (0);
 	}
 
@@ -5313,6 +5337,7 @@ static int message_handler_memb_join (
 			}
 			break;
 	}
+	free (memb_join_convert);
 	return (0);
 }
 
@@ -5322,7 +5347,7 @@ static int message_handler_memb_commit_token (
 	size_t msg_len,
 	int endian_conversion_needed)
 {
-	struct memb_commit_token *memb_commit_token_convert = alloca (msg_len);
+	struct memb_commit_token *memb_commit_token_convert;
 	struct memb_commit_token *memb_commit_token;
 	struct srp_addr sub[PROCESSOR_COUNT_MAX];
 	int sub_entries;
@@ -5336,6 +5361,13 @@ static int message_handler_memb_commit_token (
 		return (0);
 	}
 
+	memb_commit_token_convert = malloc (msg_len);
+	if (memb_commit_token_convert == NULL) {
+		log_printf (instance->totemsrp_log_level_warning,
+		    "out of memory in message_handler_memb_commit_token - ignoring token");
+		return (0);
+	}
+
 	if (endian_conversion_needed) {
 		memb_commit_token_endian_convert (msg, memb_commit_token_convert);
 	} else {
@@ -5346,6 +5378,7 @@ static int message_handler_memb_commit_token (
 
 #ifdef TEST_DROP_COMMIT_TOKEN_PERCENTAGE
 	if (random()%100 < TEST_DROP_COMMIT_TOKEN_PERCENTAGE) {
+		free (memb_commit_token_convert);
 		return (0);
 	}
 #endif
@@ -5404,6 +5437,7 @@ static int message_handler_memb_commit_token (
 			}
 			break;
 	}
+	free (memb_commit_token_convert);
 	return (0);
 }
 

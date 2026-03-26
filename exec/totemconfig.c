@@ -2125,20 +2125,20 @@ int totem_config_validate (
 		if (totem_config->interfaces[i].mcast_addr.family == AF_INET6 &&
 			totem_config->node_id == 0) {
 		        snprintf (local_error_reason, sizeof(local_error_reason),
-					"An IPV6 network requires that a node ID be specified for interface %u", i);
+					"An IPV6 network requires that a node ID be specified for interface %u", (unsigned int)i);
 			goto parse_error;
 		}
 
 		if (totem_config->broadcast_use == 0 && totem_config->transport_number == TOTEM_TRANSPORT_UDP) {
 			if (totem_config->interfaces[i].mcast_addr.family != totem_config->interfaces[i].bindnet.family) {
 				snprintf (local_error_reason, sizeof(local_error_reason),
-						"Multicast address family does not match bind address family for interface %u", i);
+						"Multicast address family does not match bind address family for interface %u", (unsigned int)i);
 				goto parse_error;
 			}
 
 			if (totemip_is_mcast (&totem_config->interfaces[i].mcast_addr) != 0) {
 				snprintf (local_error_reason, sizeof(local_error_reason),
-						"mcastaddr is not a correct multicast address for interface %u", i);
+						"mcastaddr is not a correct multicast address for interface %u", (unsigned int)i);
 				goto parse_error;
 			}
 		}
@@ -2247,7 +2247,7 @@ static int read_keyfile (
 	if (res < TOTEM_PRIVATE_KEY_LEN_MIN) {
 		snprintf (error_string_response, sizeof(error_string_response),
 			"Could only read %d bits of minimum %u bits from %s.\n",
-			 res * 8, TOTEM_PRIVATE_KEY_LEN_MIN * 8, key_location);
+			 res * 8, (unsigned int)(TOTEM_PRIVATE_KEY_LEN_MIN * 8), key_location);
 		goto parse_error;
 	}
 
