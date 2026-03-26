@@ -77,7 +77,18 @@
 #define MINIMUM_TIMEOUT				(int)(1000/HZ)*3
 #define MINIMUM_TIMEOUT_HOLD			(int)(MINIMUM_TIMEOUT * 0.8 - (1000/HZ))
 #define MAX_NETWORK_DELAY			50
-#define WINDOW_SIZE				50
+/*
+ * WINDOW_SIZE was 50 (cluster-wide unconfirmed messages before FCC throttle).
+ * For N-node clusters at rate R msg/s with rotation_ms = N ms:
+ *   msgs_per_rotation = R × N/1000
+ * If msgs_per_rotation > WINDOW_SIZE all nodes are immediately throttled.
+ * Example: 300 nodes × 1000 msg/s → 300 msgs/rotation > 50 → permanent throttle.
+ *
+ * Increased to 300 to support clusters up to ~300 nodes at 1000 msg/s.
+ * Operators with larger clusters or higher rates should set:
+ *   window_size = 2 × (expected_rate × node_count / 1000) in corosync.conf
+ */
+#define WINDOW_SIZE				300
 #define MAX_MESSAGES				17
 #define MISS_COUNT_CONST			5
 #define BLOCK_UNLISTED_IPS			1

@@ -97,7 +97,20 @@
 #define RETRANS_MESSAGE_QUEUE_SIZE_MAX		16384 /* allow 500 messages to be queued */
 #define RECEIVED_MESSAGE_QUEUE_SIZE_MAX		500 /* allow 500 messages to be queued */
 #define MAXIOVS					5
-#define RETRANSMIT_ENTRIES_MAX			30
+/*
+ * RETRANSMIT_ENTRIES_MAX was 30.  At 30+ nodes with network latency every
+ * node simultaneously needs RTR service, but only 30 slots are available per
+ * token pass.  Excess RTR requests are silently dropped, causing O(N/30)
+ * delivery latency growth (10x slower for a 300-node cluster).
+ *
+ * The token frame has TOKEN_SIZE_MAX=64000 bytes of budget.
+ * Each rtr_item = 8 bytes.  256 entries = 2048 bytes — trivial overhead.
+ * The token_storage local buffer in message_handler_orf_token is enlarged
+ * to 4096 bytes to accommodate the larger RTR list.
+ *
+ * This value should be ≥ PROCESSOR_COUNT_MAX/4 for large deployments.
+ */
+#define RETRANSMIT_ENTRIES_MAX			256
 #define TOKEN_SIZE_MAX				64000 /* bytes */
 #define LEAVE_DUMMY_NODEID                      0
 
@@ -4073,7 +4086,8 @@ static int message_handler_orf_token (
 	size_t msg_len,
 	int endian_conversion_needed)
 {
-	char token_storage[1500];
+	/* Sized for orf_token header (~40B) + 256 rtr_items × 8B = ~2088B */
+	char token_storage[4096];
 	char token_convert[1500];
 	struct orf_token *token = NULL;
 	int forward_token;

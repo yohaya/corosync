@@ -1,0 +1,311 @@
+name: Build and Release Debian Packages
+
+# Trigger on every push to stability-fixes (produces dev artifacts)
+# and on version tags (produces official releases)
+on:
+  push:
+    branches: [ stability-fixes ]
+    tags:     [ 'v*' ]
+  pull_request:
+    branches: [ stability-fixes ]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g. v3.1.10-pve1)'
+        required: false
+
+permissions:
+  contents: write   # needed to create releases and upload assets
+
+# Cancel in-progress runs on the same branch to avoid duplicates
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # -----------------------------------------------------------------------
+  # Matrix build: one job per target Debian/Proxmox release
+  # -----------------------------------------------------------------------
+  build:
+    name: Build (${{ matrix.label }})
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Proxmox VE 8 — Debian 12 (bookworm)
+          - debian_release: bookworm
+            label:          "Proxmox 8 / Debian 12"
+            pkg_distro:     bookworm
+            pkg_epoch:      pve8
+
+          # Proxmox VE 9 — Debian 13 (trixie)
+          - debian_release: trixie
+            label:          "Proxmox 9 / Debian 13"
+            pkg_distro:     trixie
+            pkg_epoch:      pve9
+
+    container:
+      image: debian:${{ matrix.debian_release }}
+
+    steps:
+      # ---- install deps before checkout so git is available ----
+      - name: Install build dependencies
+        run: |
+          set -e
+          apt-get update -qq
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            git \
+            build-essential \
+            devscripts \
+            debhelper \
+            dh-exec \
+            autoconf \
+            automake \
+            libtool \
+            pkg-config \
+            libqb-dev \
+            libknet1-dev \
+            zlib1g-dev \
+            groff \
+            docbook2x \
+            libxml2-utils \
+            xsltproc \
+            ca-certificates \
+            lsb-release
+          # Print versions for debugging
+          dpkg -l libqb-dev libknet1-dev | tail -3
+
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # full history needed for git-version-gen
+
+      # ---- derive version strings ----
+      - name: Compute package version
+        id: pkgver
+        shell: bash
+        run: |
+          set -e
+          BASE="3.1.10"
+          EPOCH="${{ matrix.pkg_epoch }}"
+          DISTRO="${{ matrix.pkg_distro }}"
+
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            TAG="${GITHUB_REF#refs/tags/v}"
+            PKG_VER="${TAG}-${EPOCH}1"
+          elif [[ "$GITHUB_REF" == refs/heads/* ]]; then
+            SHORT=$(git rev-parse --short HEAD)
+            PKG_VER="${BASE}+git${SHORT}-${EPOCH}1"
+          else
+            PKG_VER="${BASE}-${EPOCH}1"
+          fi
+
+          BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          echo "pkg_ver=${PKG_VER}"  >> "$GITHUB_OUTPUT"
+          echo "build_date=${BUILD_DATE}" >> "$GITHUB_OUTPUT"
+          echo "Building package version: ${PKG_VER} for ${DISTRO}"
+
+      # ---- patch changelog to embed correct version + distro ----
+      - name: Update debian/changelog
+        shell: bash
+        run: |
+          PKG_VER="${{ steps.pkgver.outputs.pkg_ver }}"
+          DISTRO="${{ matrix.pkg_distro }}"
+          DATE=$(date -R)
+
+          # Replace first line with versioned, correctly-targeted entry
+          python3 - <<'PYEOF'
+import re, sys
+
+with open("debian/changelog") as f:
+    content = f.read()
+
+pkg_ver  = "${{ steps.pkgver.outputs.pkg_ver }}"
+distro   = "${{ matrix.pkg_distro }}"
+label    = "${{ matrix.label }}"
+date     = "$(date -R)"
+short    = "$(git rev-parse --short HEAD 2>/dev/null || echo 'unknown')"
+
+new_header = (
+    f"corosync ({pkg_ver}) {distro}; urgency=medium\n\n"
+    f"  * Automated build for {label}\n"
+    f"  * Commit: {short}\n\n"
+    f" -- Corosync Stability Fork <users@clusterlabs.org>  {date}\n\n"
+)
+
+# Prepend new entry, keep the rest
+with open("debian/changelog", "w") as f:
+    f.write(new_header + content)
+PYEOF
+          echo "--- debian/changelog head ---"
+          head -8 debian/changelog
+
+      # ---- generate configure script ----
+      - name: Run autogen
+        run: ./autogen.sh
+
+      # ---- build the Debian binary packages ----
+      - name: Build Debian packages
+        run: |
+          dpkg-buildpackage -b -uc -us -j$(nproc)
+
+      # ---- collect .deb files and rename to include distro ----
+      - name: Collect and rename packages
+        id: collect
+        shell: bash
+        run: |
+          set -e
+          DISTRO="${{ matrix.pkg_distro }}"
+          mkdir -p dist
+
+          for deb in ../*.deb; do
+            [ -f "$deb" ] || continue
+            base=$(basename "$deb" .deb)
+            dest="dist/${base}.${DISTRO}.deb"
+            mv "$deb" "$dest"
+            echo "  $dest"
+          done
+
+          # Also copy .buildinfo and .changes for reproducibility
+          for f in ../*.buildinfo ../*.changes; do
+            [ -f "$f" ] && cp "$f" dist/ || true
+          done
+
+          ls -lh dist/
+
+      # ---- upload per-matrix artifacts ----
+      - name: Upload packages as artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: packages-${{ matrix.pkg_epoch }}
+          path: dist/*.deb
+          if-no-files-found: error
+          retention-days: 90
+
+  # -----------------------------------------------------------------------
+  # Release: gather all artifacts and publish a GitHub Release
+  # Only runs on tag pushes and workflow_dispatch with a tag
+  # -----------------------------------------------------------------------
+  release:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+
+    steps:
+      - name: Checkout (for release notes)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: List release assets
+        run: find release-assets -name '*.deb' | sort
+
+      - name: Determine release tag
+        id: tag
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            echo "tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          else
+            TAG="${{ github.event.inputs.tag }}"
+            if [[ -z "$TAG" ]]; then
+              TAG="v3.1.10-dev-$(git rev-parse --short HEAD)"
+            fi
+            echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name:   ${{ steps.tag.outputs.tag }}
+          name:       "Corosync Stability Fork ${{ steps.tag.outputs.tag }}"
+          prerelease: ${{ steps.tag.outputs.prerelease }}
+          files:      release-assets/*.deb
+          body: |
+            ## Corosync Stability Fork ${{ steps.tag.outputs.tag }}
+
+            Based on upstream corosync **v3.1.10** with stability and memory fixes
+            targeted at large-scale Proxmox VE clusters (50+ nodes).
+
+            ---
+
+            ### Installation
+
+            #### Proxmox VE 8 (Debian 12 bookworm)
+            ```bash
+            wget https://github.com/yohaya/corosync/releases/download/${{ steps.tag.outputs.tag }}/corosync_*bookworm*.deb
+            wget https://github.com/yohaya/corosync/releases/download/${{ steps.tag.outputs.tag }}/libcorosync-common4_*bookworm*.deb
+            wget https://github.com/yohaya/corosync/releases/download/${{ steps.tag.outputs.tag }}/corosync-qdevice_*bookworm*.deb
+
+            systemctl stop corosync corosync-qdevice 2>/dev/null; true
+            dpkg -i libcorosync-common4_*bookworm*.deb corosync_*bookworm*.deb corosync-qdevice_*bookworm*.deb
+            apt-get install -f   # fix any dependency issues
+            systemctl start corosync
+            ```
+
+            #### Proxmox VE 9 (Debian 13 trixie)
+            ```bash
+            # Same steps but use *trixie*.deb files
+            ```
+
+            ---
+
+            ### What's fixed
+
+            | Severity | Bug | File | Impact |
+            |----------|-----|------|--------|
+            | **CRITICAL** | 13 `assert()` crash points → graceful degradation | `exec/totemsrp.c` | Daemon restart storm on CPG failure |
+            | **CRITICAL** | `retrans_message_queue` TODO LEAK | `exec/totemsrp.c` | ~1 GB per ring-recovery event |
+            | **CRITICAL** | `assembly_list_free` unbounded growth | `exec/totempg.c` | **15+ GiB RSS** on 53-node cluster |
+            | HIGH | `alloca()` → `malloc()` (3 sites) | `exec/cpg.c` | Stack overflow with 100+ members |
+            | MEDIUM | sscanf buffer widths (10 files) | multiple | Format string buffer overflows |
+            | LOW | Dead write before if/else | `exec/totemudp.c` | Static analysis noise |
+            | LOW | `unsigned int` sign-extension | `exec/logsys.c` | Silent subsystem lookup failure |
+            | INFO | 6 DIAG runtime probes | `exec/totemsrp.c` | Token timing, ARU stall, queue pressure |
+
+            ---
+
+            ### DIAG log output (sample)
+            ```
+            DIAG ring recovery start: reason=4(CONSENSUS_TIMEOUT_EXPIRED) members=53 ...
+            DIAG ARU stall: node 192.168.1.5 holding group ARU at 0x0012ab34 for 25 consecutive passes
+            DIAG write throttled: FCC limit hit (10 consecutive passes), 847 msgs queued, rtr_gap=8192/16384 (50.0%)
+            DIAG ring recovery complete in 4231 ms (peak_retrans_hwm=2847)
+            ```
+            A `peak_retrans_hwm` above **12000** (73% of the 16384 limit) means you were near the crash boundary this build eliminates.
+
+  # -----------------------------------------------------------------------
+  # Dev artifact notification on every branch push (non-tag)
+  # -----------------------------------------------------------------------
+  notify-artifacts:
+    name: Post artifact links
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/')
+
+    steps:
+      - name: Summary
+        shell: bash
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<'EOF'
+          ## Build complete — development artifacts
+
+          | Distribution | Artifact |
+          |---|---|
+          | Proxmox 8 / Debian 12 | `packages-pve8` |
+          | Proxmox 9 / Debian 13 | `packages-pve9` |
+
+          Download from the **Actions → Artifacts** section of this run.
+          To create an official release, push a tag: `git tag v3.1.10-pve1 && git push origin v3.1.10-pve1`
+          EOF
