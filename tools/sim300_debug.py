@@ -1433,70 +1433,56 @@ def print_results(args, nodes: List[Node], ring: Ring) -> None:
 
     # ---- FIXES NEEDED section ----
     print(f"\n{'=' * 80}")
-    print(f"  === FIXES NEEDED IN C CODE ===")
+    print(f"  === ALL KNOWN C CODE FIXES (status as of pve9) ===")
     print(f"{'=' * 80}")
     print(f"""
-  The following assert sites in totemsrp.c MUST be converted from hard crashes
-  to graceful log+recover.  Each one can be triggered under realistic 300-node
-  production load as demonstrated by this simulation.
+  All assert crash sites and stability bugs have been fixed in pve1–pve9.
+  The following were the original issues and their fix status:
 
-  totemsrp.c:3078  assert(rtr_list_entries >= 0)
-      Trigger: seqno rollover or signed arithmetic after uint32 wrap
-      Fix:     log_printf + clamp to 0 (never crash on range underflow)
-      Patch:   if (rtr_list_entries < 0) {{
-                   log_printf(LOGSYS_LEVEL_WARNING,
-                       "rtr_list_entries=%d negative, clamping", rtr_list_entries);
-                   rtr_list_entries = 0;
-               }}
+  totemsrp.c  13× assert() → graceful log+recover        FIXED pve1
+  totemsrp.c  retrans_message_queue drain loop             FIXED pve1 (BUG-5)
+  totempg.c   assembly_list_free unbounded growth          FIXED pve1 (BUG-4)
+  cpg.c       alloca → malloc in notify_lib_*              FIXED pve1
+  totemsrp.c  token_storage/token_convert sizing           FIXED pve3 (BUG-1)
+  totemsrp.c  memcpy used RETRANSMIT_ENTRIES_MAX not len   FIXED pve3
+  totemsrp.c  retransmit_entries_max dynamic per-ring      FIXED pve3
+  totemsrp.c  fcc_calculate() unsigned underflow           FIXED pve3 (BUG-14)
+  totemsrp.c  check_memb_commit_token_sanity → -1          FIXED pve3
+  votequorum.c qdevice NULL guard (3 sites)                FIXED pve3
+  schedwrk.c  use-after-free hdb_handle_put order          FIXED pve2
+  cpg.c       heap overflow + calloc NULL check            FIXED pve2
+  totemknet.c crypto memcpy per-field sizes                FIXED pve2
+  totemknet.c logpipes[] init to -1 sentinel               FIXED pve2
+  totemknet.c knet_host partial state cleanup              FIXED pve2
+  main.c      signal handler async-safety                  FIXED pve2
+  totempg.c   6× assert() → graceful runtime checks        FIXED pve2
+  sq.h        3× assert() → graceful returns               FIXED pve2
+  cs_queue.h  5× assert() → fprintf + graceful             FIXED pve2
+  totemsrp.c  memb_join alloca → malloc + NULL check       FIXED pve4
+  totemsrp.c  memb_commit_token alloca → malloc (post-san) FIXED pve4
+  totemsrp.c  check_memb_join_sanity int-overflow bounds   FIXED pve4
+  totemsrp.c  check_memb_commit_token_sanity int-overflow  FIXED pve4
+  totemconfig.c format string %u/int mismatch              FIXED pve4
+  totemsrp.c  per-node RTR fairness cap (BUG-11)           FIXED pve5
+  totemsrp.c  ARU gap 75% CRITICAL warning                 FIXED pve5
+  totemsrp.c  BUG-12/13 sq_item_add NULL return            FIXED pve6
+  sq.h        BUG-14 wrap path items_miss_count leak        FIXED pve6
+  totemsrp.c  BUG-6 FCC hysteresis 20% band                FIXED pve7
+  totemsrp.c  BUG-19/21 window_size 3-tier advisory        FIXED pve7/pve8
+  totemsrp.c  BUG-20 RETRANSMIT_ENTRIES_MAX 384→2048       FIXED pve8
+  totemsrp.c  BUG-9 memb_index >= addr_entries re-gather   FIXED pve3 (also confirmed pve9)
+  totemsrp.c  BUG-22 retransmit_msg[1024] stack overflow   FIXED pve9
+  totemsrp.c  failed_node_msg sizeof(left_node_msg) typo   FIXED pve9
 
-  totemsrp.c:3387  assert(memb_index <= addr_entries)
-      Trigger: membership shrinks between commit-token creation and final processing
-               (concurrent failure + recovery scenario — reproduced {_memb_index_overflow_events}x)
-      Fix:     log_printf + re-gather instead of crash
-      Patch:   if (memb_index > addr_entries) {{
-                   log_printf(LOGSYS_LEVEL_WARNING,
-                       "memb_index %d > addr_entries %d, re-gathering",
-                       memb_index, addr_entries);
-                   memb_state_gather_enter(instance, TOTEM_FAILED_TO_RECV);
-                   return;
-               }}
-
-  totemsrp.c:3479  assert(token_memb_entries > 0)
-      Trigger: all proc_list members also in failed_list (failure storm on small partition)
-               (reproduced {_token_memb_empty_events}x under multi-failure stress)
-      Fix:     graceful self-election as sole representative
-      Patch:   if (token_memb_entries == 0) {{
-                   log_printf(LOGSYS_LEVEL_WARNING,
-                       "token_memb_entries=0, self-electing as representative");
-                   token_memb_entries = 1;
-                   memcpy(&token_memb[0], &instance->my_id, sizeof(struct totem_ip_address));
-               }}
-
-  totemsrp.c:2655  assert(header.nodeid)
-      Trigger: node-id field corrupted or zeroed during network partition replay
-      Fix:     log_printf + skip message (drop corrupt frame)
-      Patch:   if (!header.nodeid) {{
-                   log_printf(LOGSYS_LEVEL_WARNING,
-                       "received message with nodeid=0, dropping");
-                   return 0;
-               }}
-
-  totemsrp.c:2751  assert(header.nodeid)
-      Trigger: same as 2655 — duplicate assert for orf_token path
-      Fix:     same as 2655
-
-  Additional recommendations:
-    - fcc_calculate(): add 20% hysteresis to prevent BUG-6 oscillation
-      (unthrottle only when gap < WINDOW_SIZE * 0.8)
-    - orf_token_rtr(): per-node RTR cap = RETRANSMIT_ENTRIES_MAX/2 (BUG-11 — FIXED in this fork)
-      prevents one laggard monopolising all RTR slots; secondary laggards now served
-    - fcc_rtr_limit(): CRITICAL warning when ARU gap >75% of QUEUE_RTR_ITEMS_SIZE_MAX (FIXED)
-      operators get early warning before sort-queue overflow causes message loss
-    - Increase RETRANSMIT_ENTRIES_MAX from 30 to PROCESSOR_COUNT_MAX={PROCESSOR_COUNT_MAX}
-      (already done in this fork at {RETRANSMIT_ENTRIES_MAX})
-    - Increase WINDOW_SIZE from 50 to scale with cluster size
-      (already done in this fork at {WINDOW_SIZE})
+  Remaining known limitations (protocol-level, no C fix possible):
+    - BUG-7: ARU amplification — 1 slow node forces N-1 retransmits/rotation
+             Mitigation: lower consensus_timeout to eject slow nodes faster
+    - BUG-8: seqno rollover — handled correctly via unsigned arithmetic
+             Status: working as designed, no crash risk
 """)
+    if _memb_index_overflow_events > 0:
+        print(f"  NOTE: BUG-9 (memb_index overflow) triggered {_memb_index_overflow_events}x this run — "
+              f"FIXED by re-gather guard at totemsrp.c:3475")
 
     print("=" * 80)
 
