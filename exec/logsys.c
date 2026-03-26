@@ -505,16 +505,20 @@ int logsys_config_mode_set (const char *subsys, unsigned int mode)
 	return i;
 }
 
-unsigned int logsys_config_mode_get (const char *subsys)
+int logsys_config_mode_get (const char *subsys)
 {
 	int i;
 
 	i = _logsys_config_subsys_get (subsys);
 	if (i < 0) {
-		return i;
+		/* Return -1 so callers can detect "subsystem not found".
+		 * The original unsigned return type caused implicit cast to
+		 * 0xFFFFFFFF, which bypassed the error checks in logconfig.c
+		 * (e.g. "if (mode < 0)") since unsigned < 0 is always false. */
+		return -1;
 	}
 
-	return logsys_loggers[i].mode;
+	return (int)logsys_loggers[i].mode;
 }
 
 int logsys_config_file_set (

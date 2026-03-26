@@ -560,6 +560,17 @@ struct totemsrp_instance {
 	unsigned int       diag_retrans_hwm;
 	unsigned int       diag_write_throttle_count;
 	unsigned long long diag_ring_enter_ns;
+
+	/*
+	 * retransmit_entries_max: runtime RTR-list cap, set at each ring
+	 * formation from the current member count.  Replaces the static
+	 * RETRANSMIT_ENTRIES_MAX constant in the hot path so small clusters
+	 * don't advertise a larger RTR budget than needed, and large clusters
+	 * get exactly one slot per member (capped at RETRANSMIT_ENTRIES_MAX).
+	 * Initialized to RETRANSMIT_ENTRIES_MAX; updated every operational
+	 * state entry.
+	 */
+	unsigned int       retransmit_entries_max;
 };
 
 struct message_handlers {
@@ -775,6 +786,8 @@ static void totemsrp_instance_initialize (struct totemsrp_instance *instance)
 	instance->commit_token = (struct memb_commit_token *)instance->commit_token_storage;
 
 	instance->waiting_trans_ack = 1;
+
+	instance->retransmit_entries_max = RETRANSMIT_ENTRIES_MAX;
 }
 
 static int pause_flush (struct totemsrp_instance *instance)
@@ -2214,6 +2227,46 @@ static void memb_state_operational_enter (struct totemsrp_instance *instance)
 		instance->diag_aru_stall_count      = 0;
 	}
 
+	/*
+	 * Dynamic RTR sizing: give every member at least one RTR slot per
+	 * token pass.  Capped at RETRANSMIT_ENTRIES_MAX (256) so the token
+	 * frame stays within TOKEN_SIZE_MAX.
+	 * Also emit a DIAG advisory when window_size is likely too small for
+	 * the current ring size at max throughput:
+	 *   msgs_per_rotation_max = max_messages × members
+	 * If that exceeds window_size, the FCC mechanism will throttle most
+	 * nodes every rotation.  Operators should set in corosync.conf:
+	 *   window_size = max_messages × node_count   (or a higher value)
+	 */
+	{
+		unsigned int n = (unsigned int)instance->my_memb_entries;
+		unsigned int rtr_cap = n;
+		if (rtr_cap < 64) rtr_cap = 64;
+		if (rtr_cap > RETRANSMIT_ENTRIES_MAX) rtr_cap = RETRANSMIT_ENTRIES_MAX;
+		instance->retransmit_entries_max = rtr_cap;
+
+		unsigned int msgs_per_rotation_max =
+			instance->totem_config->max_messages * n;
+		unsigned int ws = instance->totem_config->window_size;
+		if (msgs_per_rotation_max > ws) {
+			log_printf (instance->totemsrp_log_level_warning,
+				"DIAG scalability: %u members × max_messages(%u) = %u "
+				"msgs/rotation exceeds window_size=%u. "
+				"FCC will throttle %u/%u nodes per rotation. "
+				"Set totem { window_size: %u } in corosync.conf to "
+				"allow all nodes to send at max rate.",
+				n, instance->totem_config->max_messages,
+				msgs_per_rotation_max, ws,
+				(msgs_per_rotation_max > ws) ? (n - ws / instance->totem_config->max_messages) : 0,
+				n, msgs_per_rotation_max);
+		}
+		log_printf (instance->totemsrp_log_level_debug,
+			"DIAG ring formed: members=%u retransmit_entries_max=%u "
+			"window_size=%u max_messages=%u",
+			n, instance->retransmit_entries_max, ws,
+			instance->totem_config->max_messages);
+	}
+
 	log_printf (instance->totemsrp_log_level_notice,
 		"A new membership (" CS_PRI_RING_ID ") was formed. Members%s%s",
 		instance->my_ring_id.rep,
@@ -3046,7 +3099,7 @@ static int orf_token_rtr (
 		range = QUEUE_RTR_ITEMS_SIZE_MAX - 1;
 	}
 
-	for (i = 1; (orf_token->rtr_list_entries < RETRANSMIT_ENTRIES_MAX) &&
+	for (i = 1; (orf_token->rtr_list_entries < (int)instance->retransmit_entries_max) &&
 		(i <= range); i++) {
 
 		/*
@@ -4088,7 +4141,14 @@ static int message_handler_orf_token (
 {
 	/* Sized for orf_token header (~40B) + 256 rtr_items × 8B = ~2088B */
 	char token_storage[4096];
-	char token_convert[1500];
+	/*
+	 * token_convert must be the same size as token_storage: both hold
+	 * a full orf_token with up to RETRANSMIT_ENTRIES_MAX RTR entries.
+	 * The old 1500-byte size was a regression introduced when
+	 * RETRANSMIT_ENTRIES_MAX was increased from 30 to 256 — a token
+	 * with 256 entries is 2088B, which would overflow 1500B.
+	 */
+	char token_convert[4096];
 	struct orf_token *token = NULL;
 	int forward_token;
 	unsigned int transmits_allowed;
@@ -4216,8 +4276,14 @@ static int message_handler_orf_token (
 	 */
 	token = (struct orf_token *)token_storage;
 	memcpy (token, msg, sizeof (struct orf_token));
+	/*
+	 * Only copy the RTR entries actually present in the received token,
+	 * not RETRANSMIT_ENTRIES_MAX worth (which may exceed msg_len).
+	 * check_orf_token_sanity() already validated that msg_len covers
+	 * token->rtr_list_entries entries, so this is a safe bounded copy.
+	 */
 	memcpy (&token->rtr_list[0], (char *)msg + sizeof (struct orf_token),
-		sizeof (struct rtr_item) * RETRANSMIT_ENTRIES_MAX);
+		sizeof (struct rtr_item) * token->rtr_list_entries);
 
 
 	/*

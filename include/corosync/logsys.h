@@ -150,7 +150,7 @@ extern int logsys_config_mode_set (
  * @param subsys
  * @return
  */
-extern unsigned int logsys_config_mode_get (
+extern int logsys_config_mode_get (
 	const char *subsys);
 
 /**
