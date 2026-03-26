@@ -1,0 +1,84 @@
+Source: corosync
+Section: admin
+Priority: optional
+Maintainer: Proxmox Stability Fork <users@clusterlabs.org>
+Build-Depends:
+ debhelper-compat (= 13),
+ autoconf,
+ automake,
+ libtool,
+ pkg-config,
+ libqb-dev (>= 2.0.0),
+ libknet1-dev,
+ libz-dev,
+ libpthread-stubs0-dev,
+ groff,
+ docbook2x,
+ libxml2-utils,
+ xsltproc,
+ dh-exec,
+Standards-Version: 4.6.2
+Homepage: https://github.com/yohaya/corosync
+Vcs-Git: https://github.com/yohaya/corosync.git -b stability-fixes
+Vcs-Browser: https://github.com/yohaya/corosync/tree/stability-fixes
+
+Package: corosync
+Architecture: linux-any
+Depends:
+ ${shlibs:Depends},
+ ${misc:Depends},
+ libcorosync-common4 (= ${binary:Version}),
+ libibverbs1 | libcorosync-common4,
+Description: Standards-based cluster framework (daemons and utilities)
+ Corosync is a group communication system with features for implementing
+ high availability within applications.
+ .
+ This package contains the Corosync executive, utilities, and default
+ configuration files.
+ .
+ This build is the yohaya/corosync stability fork based on v3.1.10 with:
+  - 13 assert() crash points replaced with graceful degradation
+  - TODO memory leak in retrans_message_queue drain loop fixed
+  - assembly_list_free unbounded growth capped (15 GiB RSS fix)
+  - cpg.c alloca() stack overflow fixed (malloc + free)
+  - Comprehensive DIAG logging: token timing, ARU stall, queue pressure
+  - totemudp.c dead-write and logsys.c sign-extension bugs fixed
+
+Package: libcorosync-common4
+Architecture: linux-any
+Section: libs
+Depends:
+ ${shlibs:Depends},
+ ${misc:Depends},
+Description: Standard cluster framework (Corosync common library)
+ Corosync is a group communication system with features for implementing
+ high availability within applications.
+ .
+ This package contains the Corosync common library.
+
+Package: libcorosync-dev
+Architecture: linux-any
+Section: libdevel
+Depends:
+ ${misc:Depends},
+ libcorosync-common4 (= ${binary:Version}),
+ libqb-dev,
+Description: Standards-based cluster framework (developer files)
+ Corosync is a group communication system with features for implementing
+ high availability within applications.
+ .
+ This package contains header files required to build applications that
+ use the Corosync libraries.
+
+Package: corosync-qdevice
+Architecture: linux-any
+Depends:
+ ${shlibs:Depends},
+ ${misc:Depends},
+ libcorosync-common4 (= ${binary:Version}),
+ corosync (= ${binary:Version}),
+Description: Standards-based cluster framework (QDevice daemon)
+ Corosync is a group communication system with features for implementing
+ high availability within applications.
+ .
+ This package contains the Corosync QDevice daemon and utilities.

@@ -1,0 +1,25 @@
+corosync (3.1.10-pve1) bookworm; urgency=high
+
+  * Stability fork based on corosync v3.1.10 (yohaya/corosync)
+  * Fix 13 assert() crash points in exec/totemsrp.c with graceful
+    degradation — eliminates daemon restart storms in large clusters
+  * Fix TODO LEAK: drain retrans_message_queue before cs_queue_reinit
+    in memb_state_recovery_enter to prevent ~1 GB per recovery event
+  * Fix assembly_list_free unbounded growth in exec/totempg.c by
+    capping free list at 8 entries — resolves 15+ GiB RSS growth
+    seen on 53-node Proxmox clusters under network instability
+  * Fix exec/cpg.c: alloca() replaced with malloc() in
+    notify_lib_totem_membership and notify_lib_joinlist to avoid
+    stack overflow with large member lists
+  * Fix exec/totemudp.c: remove dead-write before if/else chain
+  * Fix exec/logsys.c: unsigned int -> int in _logsys_config_subsys_get
+    so -1 error return propagates correctly
+  * Add comprehensive DIAG logging to exec/totemsrp.c:
+    token rotation timing, queue pressure (50/75/90% thresholds),
+    ARU stall detection, write-throttle detection,
+    ring-recovery snapshot and duration
+  * Add tools/sim200.py: 200-node simulation with 5-10ms latency
+    model, concurrent write flood, and ARU stall analysis
+
+ -- Proxmox Stability Fork <users@clusterlabs.org>  Thu, 26 Mar 2026 00:00:00 +0000
+

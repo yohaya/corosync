@@ -1,0 +1,3 @@
+usr/include/corosync/
+usr/lib/*/libcorosync_common.so
+usr/lib/*/pkgconfig/corosync.pc

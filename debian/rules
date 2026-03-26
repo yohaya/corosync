@@ -1,0 +1,37 @@
+#!/usr/bin/make -f
+
+# Proxmox/Debian build rules for corosync stability fork
+
+export DH_VERBOSE = 1
+export DEB_BUILD_MAINT_OPTIONS = hardening=+all
+
+# Disable silent rules for debugging
+export CFLAGS := $(shell dpkg-buildflags --get CFLAGS) -g
+export LDFLAGS := $(shell dpkg-buildflags --get LDFLAGS)
+
+%:
+	dh $@
+
+override_dh_auto_configure:
+	./autogen.sh
+	dh_auto_configure -- \
+		--sbindir=/usr/sbin \
+		--sysconfdir=/etc \
+		--localstatedir=/var \
+		--with-initscriptdir=/etc/init.d \
+		--with-systemd \
+		--enable-systemd \
+		--disable-dbus \
+		--disable-nozzle \
+		--enable-watchdog \
+		--enable-qdevices \
+		--with-logdir=/var/log/corosync
+
+override_dh_installsystemd:
+	dh_installsystemd --name=corosync corosync.service
+
+override_dh_strip:
+	dh_strip --dbgsym-migration='corosync-dbg (<< 3.1.10~)'
+
+override_dh_auto_test:
+	# Skip tests — they require a running cluster
