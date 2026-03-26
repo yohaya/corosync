@@ -528,6 +528,25 @@ struct totemsrp_instance {
 	void * token_recv_event_handle;
 	void * token_sent_event_handle;
 	char commit_token_storage[40000];
+
+	/*
+	 * Diagnostic fields — never affect protocol correctness,
+	 * used only for WARNING/DEBUG/TRACE log emission.
+	 *
+	 * token_last_recv_ns:   nanosecond timestamp of last token receipt
+	 *                       (for rotation-time measurement)
+	 * diag_aru_stall_addr:  node currently holding group ARU down
+	 * diag_aru_stall_count: consecutive token passes at same stall node
+	 * diag_retrans_hwm:     retrans_message_queue high-water mark (peak used)
+	 * diag_write_throttle_count: consecutive passes where FCC limited to 0
+	 * diag_ring_enter_ns:   timestamp when last entered GATHER state
+	 */
+	unsigned long long diag_token_last_recv_ns;
+	unsigned int       diag_aru_stall_addr;
+	unsigned int       diag_aru_stall_count;
+	unsigned int       diag_retrans_hwm;
+	unsigned int       diag_write_throttle_count;
+	unsigned long long diag_ring_enter_ns;
 };
 
 struct message_handlers {
@@ -2142,6 +2161,46 @@ static void memb_state_operational_enter (struct totemsrp_instance *instance)
 
 	log_printf (instance->totemsrp_log_level_debug,
 		"entering OPERATIONAL state.");
+
+	/*
+	 * DIAGNOSTIC: ring recovery duration.
+	 *
+	 * Log how long the ring spent in GATHER+RECOVERY states.
+	 * Duration > token_timeout × 3 indicates repeated consensus
+	 * failures (usually due to a flapping node or network partition).
+	 * Also reset the per-ring peak metrics so the next inter-failure
+	 * window starts clean.
+	 */
+	if (instance->diag_ring_enter_ns != 0) {
+		unsigned long long _diag_recovery_ms =
+			(qb_util_nano_current_get () - instance->diag_ring_enter_ns) /
+			QB_TIME_NS_IN_MSEC;
+		unsigned int _triple_tok = instance->totem_config->token_timeout * 3;
+		if (_diag_recovery_ms > (unsigned long long)_triple_tok) {
+			log_printf (instance->totemsrp_log_level_warning,
+				"DIAG ring recovery took %llu ms (token_timeout=%u ms ×3=%u ms) "
+				"— repeated consensus failures or partition; "
+				"peak_retrans_hwm=%u write_throttle_max=%u",
+				(unsigned long long)_diag_recovery_ms,
+				instance->totem_config->token_timeout,
+				_triple_tok,
+				instance->diag_retrans_hwm,
+				instance->diag_write_throttle_count);
+		} else {
+			log_printf (instance->totemsrp_log_level_notice,
+				"DIAG ring recovery complete in %llu ms "
+				"(peak_retrans_hwm=%u)",
+				(unsigned long long)_diag_recovery_ms,
+				instance->diag_retrans_hwm);
+		}
+		/* Reset per-ring peak counters */
+		instance->diag_ring_enter_ns        = 0;
+		instance->diag_retrans_hwm          = 0;
+		instance->diag_write_throttle_count = 0;
+		instance->diag_aru_stall_addr       = 0;
+		instance->diag_aru_stall_count      = 0;
+	}
+
 	log_printf (instance->totemsrp_log_level_notice,
 		"A new membership (" CS_PRI_RING_ID ") was formed. Members%s%s",
 		instance->my_ring_id.rep,
@@ -2236,6 +2295,40 @@ static void memb_state_gather_enter (
 	log_printf (instance->totemsrp_log_level_debug,
 		    "entering GATHER state from %d(%s).",
 		    gather_from, gsfrom_to_msg(gather_from));
+
+	/*
+	 * DIAGNOSTIC: ring recovery snapshot.
+	 *
+	 * Captures queue state and seqno positions at the moment the ring
+	 * enters GATHER.  This is the most useful single log line for
+	 * post-mortem analysis: it shows whether the trigger was a slow
+	 * node (large ARU gap), write saturation (large new_message_queue),
+	 * or message loss (large retrans_message_queue).
+	 *
+	 * retrans_hwm shows the peak fill seen since daemon start or last
+	 * ring formation — a value close to QUEUE_RTR_ITEMS_SIZE_MAX (16384)
+	 * means the cluster was close to the assert-crash boundary.
+	 */
+	instance->diag_ring_enter_ns = qb_util_nano_current_get ();
+	log_printf (instance->totemsrp_log_level_notice,
+		"DIAG ring recovery start: reason=%d(%s) members=%d "
+		"my_aru=%x high_seq=%x aru_gap=%u "
+		"retrans_q=%d/%zu new_q=%d/%zu "
+		"retrans_hwm=%u write_throttle=%u aru_stall_node=" CS_PRI_NODE_ID
+		" aru_stall_passes=%u",
+		gather_from, gsfrom_to_msg(gather_from),
+		instance->my_memb_entries,
+		instance->my_aru,
+		instance->my_high_seq_received,
+		instance->my_high_seq_received - instance->my_aru,
+		cs_queue_used (&instance->retrans_message_queue),
+		instance->retrans_message_queue.size - 1,
+		cs_queue_used (&instance->new_message_queue),
+		instance->new_message_queue.size - 1,
+		instance->diag_retrans_hwm,
+		instance->diag_write_throttle_count,
+		(unsigned int)instance->diag_aru_stall_addr,
+		instance->diag_aru_stall_count);
 
 	instance->memb_state = MEMB_STATE_GATHER;
 	instance->stats.gather_entered++;
@@ -3733,6 +3826,50 @@ static void fcc_rtr_limit (
 
 			*transmits_allowed = 0;
 	}
+
+	/*
+	 * DIAGNOSTIC: write-throttle detection.
+	 *
+	 * When transmits_allowed=0 while there are messages waiting in
+	 * new_message_queue, every token pass is wasted throughput.
+	 * Sustained throttling across 10+ consecutive passes means the ring
+	 * is write-saturated — either due to a slow node holding down ARU
+	 * (causing the RTR queue to back-fill) or a message-rate spike.
+	 *
+	 * The gap (token.seq - last_released) is the key metric: it tells
+	 * operators how many in-flight messages are occupying the RTR queue.
+	 * The closer this is to QUEUE_RTR_ITEMS_SIZE_MAX (16384), the closer
+	 * the ring is to the drop-boundary fixed in this build.
+	 */
+	if (*transmits_allowed == 0) {
+		int _wq = cs_queue_used (&instance->new_message_queue);
+		if (_wq > 0) {
+			unsigned int _gap = token->seq - instance->last_released;
+			instance->diag_write_throttle_count++;
+			if (instance->diag_write_throttle_count == 1   ||
+			    instance->diag_write_throttle_count == 10  ||
+			    (instance->diag_write_throttle_count % 50) == 0) {
+				log_printf (instance->totemsrp_log_level_warning,
+					"DIAG write throttled: FCC limit hit "
+					"(%u consecutive passes), %d msgs queued, "
+					"rtr_gap=%u/%u (%.1f%%) aru_stall=" CS_PRI_NODE_ID,
+					instance->diag_write_throttle_count,
+					_wq,
+					_gap, QUEUE_RTR_ITEMS_SIZE_MAX,
+					(_gap * 100.0f) / QUEUE_RTR_ITEMS_SIZE_MAX,
+					(unsigned int)instance->diag_aru_stall_addr);
+			}
+		}
+	} else {
+		if (instance->diag_write_throttle_count >= 10) {
+			log_printf (instance->totemsrp_log_level_debug,
+				"DIAG write throttle cleared after %u passes, "
+				"transmits_allowed=%u",
+				instance->diag_write_throttle_count,
+				*transmits_allowed);
+		}
+		instance->diag_write_throttle_count = 0;
+	}
 }
 
 static void fcc_token_update (
@@ -3957,6 +4094,88 @@ static int message_handler_orf_token (
 	    "Time since last token %0.4f ms", tv_diff / (float)QB_TIME_NS_IN_MSEC);
 #endif
 
+	/*
+	 * DIAGNOSTIC: token rotation time and queue pressure.
+	 *
+	 * Rotation time > 50% of token_timeout signals that the ring is
+	 * running close to its timing limit and a token loss is imminent.
+	 * Log at WARNING so operators see it without enabling DEBUG.
+	 *
+	 * Queue pressure at >= 75% fill is the leading indicator of the
+	 * assert(range < QUEUE_RTR_ITEMS_SIZE_MAX) crashes fixed in this
+	 * build.  Even with the clamp in place, sustained pressure means
+	 * messages are being dropped silently; operators must know.
+	 */
+	{
+		unsigned long long _diag_now_ns = qb_util_nano_current_get ();
+		if (instance->diag_token_last_recv_ns != 0) {
+			unsigned long long _diag_diff_ms =
+				(_diag_now_ns - instance->diag_token_last_recv_ns) /
+				QB_TIME_NS_IN_MSEC;
+			unsigned int _tok_half = instance->totem_config->token_timeout / 2;
+			if (_diag_diff_ms > (unsigned long long)instance->totem_config->token_timeout) {
+				log_printf (instance->totemsrp_log_level_warning,
+					"DIAG token gap %llu ms EXCEEDS token_timeout %u ms "
+					"— ring may be recovering (state=%d backlog=%d rtr=%d)",
+					(unsigned long long)_diag_diff_ms,
+					instance->totem_config->token_timeout,
+					instance->memb_state,
+					cs_queue_used (&instance->new_message_queue),
+					((const struct orf_token *)msg)->rtr_list_entries);
+			} else if (_diag_diff_ms > (unsigned long long)_tok_half) {
+				log_printf (instance->totemsrp_log_level_warning,
+					"DIAG token rotation slow: %llu ms (50%% of %u ms timeout) "
+					"state=%d backlog=%d rtr=%d",
+					(unsigned long long)_diag_diff_ms,
+					instance->totem_config->token_timeout,
+					instance->memb_state,
+					cs_queue_used (&instance->new_message_queue),
+					((const struct orf_token *)msg)->rtr_list_entries);
+			} else {
+				log_printf (instance->totemsrp_log_level_trace,
+					"DIAG token rotation: %llu ms  backlog=%d rtr=%d",
+					(unsigned long long)_diag_diff_ms,
+					cs_queue_used (&instance->new_message_queue),
+					((const struct orf_token *)msg)->rtr_list_entries);
+			}
+		}
+		instance->diag_token_last_recv_ns = _diag_now_ns;
+
+		/* Queue pressure: retrans and new_message queues */
+		{
+			int _rq_used = cs_queue_used (&instance->retrans_message_queue);
+			int _nq_used = cs_queue_used (&instance->new_message_queue);
+			int _rq_cap  = (int)instance->retrans_message_queue.size - 1;
+			int _nq_cap  = (int)instance->new_message_queue.size - 1;
+			int _rq_pct  = (_rq_cap > 0) ? (_rq_used * 100 / _rq_cap) : 0;
+			int _nq_pct  = (_nq_cap > 0) ? (_nq_used * 100 / _nq_cap) : 0;
+
+			if ((unsigned int)_rq_used > instance->diag_retrans_hwm) {
+				instance->diag_retrans_hwm = (unsigned int)_rq_used;
+			}
+			if (_rq_pct >= 90 || _nq_pct >= 90) {
+				log_printf (instance->totemsrp_log_level_warning,
+					"DIAG queue CRITICAL: retrans=%d/%d (%d%%) "
+					"new=%d/%d (%d%%) hwm=%u — drop risk",
+					_rq_used, _rq_cap, _rq_pct,
+					_nq_used, _nq_cap, _nq_pct,
+					instance->diag_retrans_hwm);
+			} else if (_rq_pct >= 75 || _nq_pct >= 75) {
+				log_printf (instance->totemsrp_log_level_warning,
+					"DIAG queue pressure: retrans=%d/%d (%d%%) "
+					"new=%d/%d (%d%%) hwm=%u",
+					_rq_used, _rq_cap, _rq_pct,
+					_nq_used, _nq_cap, _nq_pct,
+					instance->diag_retrans_hwm);
+			} else if (_rq_pct >= 50 || _nq_pct >= 50) {
+				log_printf (instance->totemsrp_log_level_debug,
+					"DIAG queue fill: retrans=%d%%  new=%d%%  hwm=%u",
+					_rq_pct, _nq_pct,
+					instance->diag_retrans_hwm);
+			}
+		}
+	}
+
 	if (check_orf_token_sanity(instance, msg, msg_len, sizeof(token_storage),
 	    endian_conversion_needed) == -1) {
 		return (0);
@@ -4120,6 +4339,57 @@ printf ("token seq %d\n", token->seq);
 			instance->my_aru_count += 1;
 		} else {
 			instance->my_aru_count = 0;
+		}
+
+		/*
+		 * DIAGNOSTIC: ARU stall detection.
+		 *
+		 * When the same node holds group ARU down for many consecutive
+		 * token passes it means that node is dropping messages or is very
+		 * slow.  Log at WARNING at pass counts 5, 25, and every 100 after.
+		 * This is the primary observable symptom before the ring declares
+		 * the node failed (fail_to_recv_const passes, default 2500).
+		 */
+		if (token->aru_addr != 0) {
+			if (token->aru_addr == instance->diag_aru_stall_addr) {
+				instance->diag_aru_stall_count++;
+				if (instance->diag_aru_stall_count == 5  ||
+				    instance->diag_aru_stall_count == 25 ||
+				    (instance->diag_aru_stall_count % 100) == 0) {
+					log_printf (instance->totemsrp_log_level_warning,
+						"DIAG ARU stall: node " CS_PRI_NODE_ID
+						" holding group ARU at %x for %u consecutive"
+						" token passes (token.seq=%x gap=%u"
+						" fail_thresh=%u)",
+						(unsigned int)token->aru_addr,
+						token->aru,
+						instance->diag_aru_stall_count,
+						token->seq,
+						token->seq - token->aru,
+						instance->totem_config->fail_to_recv_const);
+				}
+			} else {
+				if (instance->diag_aru_stall_count > 0) {
+					log_printf (instance->totemsrp_log_level_debug,
+						"DIAG ARU stall cleared: node " CS_PRI_NODE_ID
+						" stalled for %u passes, new stall node " CS_PRI_NODE_ID,
+						(unsigned int)instance->diag_aru_stall_addr,
+						instance->diag_aru_stall_count,
+						(unsigned int)token->aru_addr);
+				}
+				instance->diag_aru_stall_addr  = token->aru_addr;
+				instance->diag_aru_stall_count = 1;
+			}
+		} else {
+			if (instance->diag_aru_stall_count > 5) {
+				log_printf (instance->totemsrp_log_level_debug,
+					"DIAG ARU stall resolved: node " CS_PRI_NODE_ID
+					" stalled for %u passes, ARU now caught up",
+					(unsigned int)instance->diag_aru_stall_addr,
+					instance->diag_aru_stall_count);
+			}
+			instance->diag_aru_stall_addr  = 0;
+			instance->diag_aru_stall_count = 0;
 		}
 
 		/*
