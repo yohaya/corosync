@@ -564,6 +564,7 @@ struct totemsrp_instance {
 	unsigned int       diag_write_throttle_count;
 	unsigned int       diag_aru_gap_warn_count;   /* passes with ARU gap >75% of queue */
 	unsigned long long diag_ring_enter_ns;
+	unsigned int       fcc_throttled;             /* BUG-6: hysteresis state — 1=throttled */
 
 	/*
 	 * retransmit_entries_max: runtime RTR-list cap, set at each ring
@@ -2230,6 +2231,7 @@ static void memb_state_operational_enter (struct totemsrp_instance *instance)
 		instance->diag_aru_stall_addr       = 0;
 		instance->diag_aru_stall_count      = 0;
 		instance->diag_aru_gap_warn_count   = 0;
+		instance->fcc_throttled             = 0;
 	}
 
 	/*
@@ -2254,14 +2256,25 @@ static void memb_state_operational_enter (struct totemsrp_instance *instance)
 			instance->totem_config->max_messages * n;
 		unsigned int ws = instance->totem_config->window_size;
 		if (msgs_per_rotation_max > ws) {
-			log_printf (instance->totemsrp_log_level_warning,
-				"DIAG scalability: %u members × max_messages(%u) = %u "
-				"msgs/rotation exceeds window_size=%u. "
-				"FCC will throttle %u/%u nodes per rotation. "
-				"Set totem { window_size: %u } in corosync.conf to "
-				"allow all nodes to send at max rate.",
-				n, instance->totem_config->max_messages,
-				msgs_per_rotation_max, ws,
+			/*
+			 * BUG-19: window_size is too small for this cluster.  Severity
+			 * scales with how far off we are:
+			 *   < 50% of ideal → CRIT: FCC permanently throttles all nodes
+			 *                     even at minimum traffic; throughput near 0.
+			 *   50–100% of ideal → WARNING: throttle begins early but cluster
+			 *                     can still make progress.
+			 */
+			int level = (ws * 2 < msgs_per_rotation_max)
+			    ? instance->totemsrp_log_level_error
+			    : instance->totemsrp_log_level_warning;
+			log_printf (level,
+				"%s window_size=%u is too small for %u-node ring "
+				"(max_messages(%u) × members(%u) = %u msgs/rotation). "
+				"FCC will throttle %u/%u nodes per rotation — "
+				"set totem { window_size: %u } in corosync.conf.",
+				(ws * 2 < msgs_per_rotation_max) ? "CRITICAL:" : "WARNING:",
+				ws, n,
+				instance->totem_config->max_messages, n, msgs_per_rotation_max,
 				(msgs_per_rotation_max > ws) ? (n - ws / instance->totem_config->max_messages) : 0,
 				n, msgs_per_rotation_max);
 		}
@@ -3969,15 +3982,35 @@ static int fcc_calculate (
 	transmits_allowed = instance->totem_config->max_messages;
 
 	/*
-	 * Guard against unsigned underflow: when token->fcc has already
-	 * reached or exceeded window_size (possible under burst traffic or
-	 * after a slow node held the token), the subtraction would wrap to
-	 * a huge positive number and the condition below would be false —
-	 * allowing this node to send max_messages even though the cluster-
-	 * wide FCC budget is already exhausted.  Clamp to 0 instead.
+	 * BUG-6 FIX: 20% hysteresis on FCC throttle to prevent rapid oscillation
+	 * when FCC utilisation hovers near window_size.  Without hysteresis the
+	 * binary threshold causes alternating throttle/unthrottle every rotation,
+	 * wasting RTR budget on repeated retransmit storms.
+	 *
+	 * State machine:
+	 *   unthrottled → throttled : token->fcc >= window_size  (hard ceiling)
+	 *   throttled → unthrottled : token->fcc <  window_size * 4/5  (80% floor)
+	 *
+	 * instance->fcc_throttled is reset to 0 at each ring formation so a new
+	 * ring always starts unthrottled regardless of prior state.
 	 */
-	if (token->fcc >= instance->totem_config->window_size) {
-		return (0);
+	{
+		unsigned int ws   = instance->totem_config->window_size;
+		unsigned int fcc  = token->fcc;
+		unsigned int low  = ws * 4 / 5;   /* 80% — unthrottle threshold */
+
+		if (instance->fcc_throttled) {
+			if (fcc < low) {
+				instance->fcc_throttled = 0;
+			} else {
+				return (0);
+			}
+		} else {
+			if (fcc >= ws) {
+				instance->fcc_throttled = 1;
+				return (0);
+			}
+		}
 	}
 
 	if (transmits_allowed > instance->totem_config->window_size - token->fcc) {

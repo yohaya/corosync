@@ -2,39 +2,30 @@
 """
 sim300_debug.py — Corosync TOTEM 300-node ring simulation (DEBUG / BUG-PROBE edition)
 ======================================================================================
-Extended version of sim300.py with strace-like probes for BUG-6 through BUG-10.
+Extended version of sim300.py with strace-like probes for BUG-6 through BUG-19.
 
-New findings in this variant (on top of BUG-1..BUG-5 from sim300.py):
+Bugs tracked in this variant (on top of BUG-1..BUG-5 from sim300.py):
 
-  BUG-6: FCC OSCILLATION (totemsrp.c fcc_calculate)
-    Binary FCC has no hysteresis.  When the ARU gap hovers near WINDOW_SIZE,
-    the throttle snaps on and off every rotation, wasting token passes on
-    retransmit overhead.  At 300 nodes the boundary is crossed repeatedly.
-
-  BUG-7: SLOW-NODE ARU AMPLIFICATION (totemsrp.c orf_token_rtr)
-    One laggard forces ALL other 299 nodes to retransmit to it.  RTR traffic
-    = laggard_gap × (N-1) messages.  With a 10ms-latency slow node this
-    produces thousands of induced retransmits per minute.
-
-  BUG-8: SEQNO ROLLOVER (totemsrp.c / sq.h)
-    Starting near 0xFFFFFFFF tests uint32 wraparound.  sq_diff/sq_add handle
-    it correctly but assert(rtr_list_entries >= 0) at totemsrp.c:3078 can
-    fire if the range is computed with signed arithmetic after a wrap.
-
-  BUG-9: COMMIT TOKEN memb_index OVERFLOW (totemsrp.c:3387)
-    assert(memb_index <= addr_entries) fires when membership shrinks between
-    the moment the commit token is created and when the last node processes it.
-    Reproducible during concurrent failures mid-recovery.
-
-  BUG-10: token_memb_entries == 0 (totemsrp.c:3479)
-    assert(token_memb_entries > 0) fires when all proc_list members end up in
-    failed_list simultaneously — e.g. during a failure storm on a small partition.
-
-  BUG-11: RTR SLOT MONOPOLIZATION (totemsrp.c orf_token_rtr)
-    A single badly laggard node fills ALL RETRANSMIT_ENTRIES_MAX RTR slots on
-    every rotation.  Secondary laggard nodes get 0 RTR slots and accumulate
-    thousands of unserviced retransmit requests.  Fix: per-node RTR cap at
-    RETRANSMIT_ENTRIES_MAX/2 leaves half the list for subsequent nodes in ring.
+  BUG-6:  FCC OSCILLATION — binary throttle/unthrottle with no hysteresis.
+          Fixed in pve6: 20% hysteresis — unthrottle only at gap < WINDOW_SIZE*0.8
+  BUG-7:  SLOW-NODE ARU AMPLIFICATION — one laggard forces all others to retransmit.
+  BUG-8:  SEQNO ROLLOVER — uint32 wrap; sq_diff/sq_add handle correctly (verified).
+  BUG-9:  COMMIT TOKEN memb_index OVERFLOW — assert replaced w/ graceful re-gather.
+  BUG-10: token_memb_entries == 0 — assert replaced w/ graceful self-election.
+  BUG-11: RTR SLOT MONOPOLIZATION — fixed: per-node cap = RETRANSMIT_ENTRIES_MAX/2.
+  BUG-12: sq_item_add NULL ignored in orf_token_mcast — fixed pve6 (buffer leak).
+  BUG-13: sq_item_add NULL ignored in message_handler_mcast — fixed pve6 (TODO LEAK).
+  BUG-14: sq_items_release wrap path skipped items_miss_count clear — fixed pve6.
+  BUG-15: SORT QUEUE OVERFLOW THRESHOLD — when ARU gap exceeds 90% of 16384,
+          fcc_rtr_limit will zero transmits_allowed and BUG-12/13 paths become hot.
+  BUG-16: MULTI-SLOW-NODE RTR STARVATION — with 3 slow nodes at different drop
+          rates, fairness cap still leaves some laggards unserviced for long runs.
+  BUG-17: DELIVERY ORDERING VIOLATION — if sq_item_add silently drops a seqno
+          (slot already in-use), the node delivers a gap, breaking TOTEM guarantees.
+  BUG-18: DYNAMIC RTR CAP CLIFF — when cluster shrinks below 64 nodes, cap drops
+          to 64 and per-node budget halves; recovery storms may overwhelm the budget.
+  BUG-19: FCC WINDOW UNDERSIZE — if window_size < max_messages × active_nodes,
+          FCC throttles every rotation from the start, producing zero steady throughput.
 
 Usage:
     python3 sim300_debug.py                        # default 300 nodes, 180s
@@ -43,6 +34,7 @@ Usage:
     python3 sim300_debug.py --rollover             # force seqno to 0xFFFFFF00
     python3 sim300_debug.py --fixed                # use fork constants (rtr=384, win=300)
     python3 sim300_debug.py --stress --multi-fail --trace
+    python3 sim300_debug.py --multi-slow           # 3 slow nodes at different drop rates
 """
 
 import argparse
@@ -165,6 +157,33 @@ _rtr_monopolization_staved: int = 0   # total RTR requests blocked by cap
 _multi_failure_events: int = 0
 _concurrent_failures: int = 0
 
+# BUG-12/13: sq_item_add NULL — would-be triggers (sort queue overflow/duplicate)
+_sq_overflow_events: int = 0          # rotations where ARU gap >= QUEUE_RTR_ITEMS_SIZE_MAX
+
+# BUG-14: sq_items_release wrap path miss_count — seqno wraps with in-flight msgs
+_sq_wrap_with_inflight: int = 0       # seqno wraps while miss_counts would be non-zero
+
+# BUG-15: sort queue high-water warning (>90% full → fcc_rtr_limit hits 0)
+_sq_hw_90pct_events: int = 0          # rotations where ARU gap > 90% of QUEUE_RTR_ITEMS_SIZE_MAX
+_sq_hw_95pct_events: int = 0          # rotations where ARU gap > 95% of QUEUE_RTR_ITEMS_SIZE_MAX
+_sq_hw_peak_pct: float = 0.0          # peak ARU gap as % of QUEUE_RTR_ITEMS_SIZE_MAX
+
+# BUG-16: multi-slow-node — per-slow-node stall tracking
+_multi_slow_stall_ms: Dict[int, float] = {}
+
+# BUG-17: delivery ordering violations
+_delivery_order_violations: int = 0   # delivered seqno N when N-1 not yet received
+_prev_delivered: Dict[int, int] = {}  # per-node last-delivered seqno
+
+# BUG-18: dynamic RTR cap cliff (shrink below 64 nodes)
+_rtr_cap_cliff_events: int = 0        # ring formations where cap < prior cap by >50%
+_prev_rtr_cap: int = 0
+
+# BUG-19: FCC window undersize
+_fcc_window_undersize_events: int = 0 # rotations where max_messages*active > window_size
+FCC_HYSTERESIS_RATIO     = 0.80       # unthrottle only when gap < WINDOW_SIZE * 0.80
+_fcc_throttle_state: bool = False     # current hysteresis state
+
 # Delivery latency histogram (in ring rotations)
 _latency_histogram: Dict[int, int] = {}
 
@@ -262,6 +281,7 @@ class Node:
     inbox: Deque[PendingDelivery] = field(default_factory=collections.deque)
 
     is_slow:        bool = False
+    slow_drop_prob: float = DROP_SLOW_NODE_PROB   # per-node customizable drop rate
     is_partitioned: bool = False
     is_nic_flap:    bool = False
     rejoined_partition: bool = False
@@ -307,7 +327,7 @@ class Node:
             self.stats.msgs_dropped += 1
             return
         if self.is_slow and not is_retransmit:
-            if rng.random() < DROP_SLOW_NODE_PROB:
+            if rng.random() < self.slow_drop_prob:
                 self.stats.msgs_dropped += 1
                 return
         if is_retransmit:
@@ -480,6 +500,18 @@ class Ring:
         self.recovery_count += 1
         self._consec_loss = 0
 
+        # ---- BUG-18: dynamic RTR cap cliff (cluster shrinks) ----
+        global _rtr_cap_cliff_events, _prev_rtr_cap
+        active = sum(1 for n in self.nodes if not n.is_partitioned and not n.is_nic_flap)
+        new_cap = max(64, min(active, RETRANSMIT_ENTRIES_MAX))
+        if _prev_rtr_cap > 0 and new_cap < _prev_rtr_cap * 0.5:
+            _rtr_cap_cliff_events += 1
+            probe(sim_time, "rtr_cap_cliff", trigger_node,
+                  f"RTR cap dropped {_prev_rtr_cap}→{new_cap} "
+                  f"(cluster shrunk {_prev_rtr_cap}→{active} nodes, >50% cap reduction); "
+                  f"per-node budget halved — recovery storms may overwhelm RTR budget")
+        _prev_rtr_cap = new_cap
+
         # ---- BUG-9: simulate memb_index overflow (totemsrp.c:3387) ----
         # When a new ring forms while another is mid-commit, memb_index can exceed
         # addr_entries if membership shrinks between commit token creation and
@@ -596,12 +628,32 @@ class Ring:
     # ---- flow control ----
 
     def _fcc_transmits_allowed(self) -> int:
-        global _throttle_events
+        global _throttle_events, _fcc_throttle_state, _fcc_window_undersize_events
         allowed = MAX_MESSAGES
         if self.token.seq != SEQNO_INITIAL and self.group_aru != SEQNO_INITIAL:
             gap = sq_diff(self.token.seq, self.group_aru)
-            if gap >= WINDOW_SIZE:
-                allowed = max(1, MAX_MESSAGES // 4)
+
+            # BUG-6 FIX (pve6): 20% hysteresis — once throttled, only unthrottle
+            # when gap drops below WINDOW_SIZE * FCC_HYSTERESIS_RATIO (0.80).
+            # This prevents rapid oscillation when ARU gap hovers near WINDOW_SIZE.
+            throttle_threshold   = WINDOW_SIZE
+            unthrottle_threshold = int(WINDOW_SIZE * FCC_HYSTERESIS_RATIO)
+            if _fcc_throttle_state:
+                if gap < unthrottle_threshold:
+                    _fcc_throttle_state = False
+                else:
+                    allowed = 0
+            else:
+                if gap >= throttle_threshold:
+                    _fcc_throttle_state = True
+                    allowed = 0
+
+            # BUG-19: FCC window undersize check — if window_size < max_messages *
+            # active_nodes, FCC throttles EVERY rotation from steady state.
+            active = sum(1 for n in self.nodes if not n.is_partitioned and not n.is_nic_flap)
+            if MAX_MESSAGES * active > WINDOW_SIZE and gap > 0:
+                _fcc_window_undersize_events += 1
+
             rtr_range    = gap
             rtr_headroom = QUEUE_RTR_ITEMS_SIZE_MAX - WINDOW_SIZE
             if rtr_range + allowed >= rtr_headroom:
@@ -623,6 +675,8 @@ class Ring:
         global _latency_rtrs, _rtr_starvation_events, _fcc_deadlock_events, _retrans_buf_peak
         global _fcc_oscillation_events, _fcc_last_state
         global _aru_amplification_total_rtrs, _aru_amplification_events
+        global _sq_overflow_events, _sq_hw_90pct_events, _sq_hw_95pct_events, _sq_hw_peak_pct
+        global _sq_wrap_with_inflight, _delivery_order_violations, _prev_delivered
         global _seqno_rollover_count
 
         self.tick += 1
@@ -738,7 +792,7 @@ class Ring:
                 self.fcc_deadlock_count += 1
                 _fcc_deadlock_events    += 1
 
-        # BUG-6: FCC oscillation detection
+        # BUG-6: FCC oscillation detection (hysteresis fix now applied in _fcc_transmits_allowed)
         is_throttled = fcc_throttled_count > 0
         if is_throttled != _fcc_last_state and self.tick > 5:
             _fcc_oscillation_events += 1
@@ -746,6 +800,65 @@ class Ring:
                   f"{'throttled' if is_throttled else 'unthrottled'} "
                   f"throttled_count={fcc_throttled_count}/{active_count}")
         _fcc_last_state = is_throttled
+
+        # BUG-12/13/15: sort queue overflow threshold probes
+        if self.token.seq != SEQNO_INITIAL and self.group_aru != SEQNO_INITIAL:
+            aru_gap = sq_diff(self.token.seq, self.group_aru)
+            pct = aru_gap / QUEUE_RTR_ITEMS_SIZE_MAX
+            if pct > _sq_hw_peak_pct:
+                _sq_hw_peak_pct = pct
+            if aru_gap >= QUEUE_RTR_ITEMS_SIZE_MAX:
+                _sq_overflow_events += 1
+                probe(sim_time, "sq_overflow", self.holder_idx,
+                      f"ARU gap={aru_gap} >= QUEUE_RTR_ITEMS_SIZE_MAX={QUEUE_RTR_ITEMS_SIZE_MAX} "
+                      f"— BUG-12/13 would trigger; pve6 fix releases buffers gracefully")
+            elif pct >= 0.95:
+                _sq_hw_95pct_events += 1
+                probe(sim_time, "sq_hw_95pct", self.holder_idx,
+                      f"ARU gap={aru_gap} ({pct*100:.1f}% of {QUEUE_RTR_ITEMS_SIZE_MAX}) "
+                      f"CRITICAL: 5% headroom before sort-queue overflow + silent msg loss")
+            elif pct >= 0.90:
+                _sq_hw_90pct_events += 1
+
+        # BUG-14: seqno rollover with in-flight miss counts
+        # Track if any node has gaps (would have non-zero miss_count) at rollover time
+        if _seqno_rollover_count > 0:
+            active_nodes_with_gaps = sum(
+                1 for n in self.nodes
+                if not n.is_partitioned and not n.is_nic_flap
+                and n.my_aru != self.token.seq
+                and n.my_aru != SEQNO_INITIAL
+            )
+            if active_nodes_with_gaps > 0:
+                _sq_wrap_with_inflight += 1
+                probe(sim_time, "sq_wrap_with_inflight", -1,
+                      f"rollover with {active_nodes_with_gaps} nodes having gaps "
+                      f"— pve6 fix clears miss_counts on wrap path")
+
+        # BUG-17: delivery ordering check — verify that when my_delivered advances,
+        # every seqno in [prev_delivered+1 .. my_delivered] is present in rx_set.
+        # Batch delivery (my_delivered advancing by N > 1 at once) is valid TOTEM
+        # behaviour; what's invalid is advancing past a seqno NOT in rx_set.
+        for n in self.nodes:
+            if n.is_partitioned or n.is_nic_flap:
+                continue
+            if n.my_delivered != SEQNO_INITIAL:
+                prev = _prev_delivered.get(n.node_id, SEQNO_INITIAL)
+                if prev != SEQNO_INITIAL and n.my_delivered != prev:
+                    gap_size = sq_diff(n.my_delivered, prev)
+                    # Only check for small gaps (large gaps are expected during recovery)
+                    if 1 < gap_size < 128:
+                        # Verify all intermediate seqnos are in rx_set
+                        for j in range(1, gap_size + 1):
+                            check_seq = sq_add(prev, j)
+                            if check_seq not in n.rx_set:
+                                _delivery_order_violations += 1
+                                probe(sim_time, "delivery_order_violation", n.node_id,
+                                      f"delivered up to seq={n.my_delivered:#010x} "
+                                      f"but seq={check_seq:#010x} NOT in rx_set "
+                                      f"— TOTEM ordering violated!")
+                                break  # one per node per rotation is enough
+                _prev_delivered[n.node_id] = n.my_delivered
 
         # BUG-7: ARU amplification — track if a slow node is holding back the cluster
         laggard_id = self._find_laggard()
@@ -1164,6 +1277,102 @@ def print_results(args, nodes: List[Node], ring: Ring) -> None:
         print(f"    Not triggered — only one laggard node in this run (single-laggard"
               f" scenario does not exhibit monopolization).")
 
+    # BUG-12/13 (FIXED pve6)
+    print(f"\n  BUG-12/13: sq_item_add NULL Return (orf_token_mcast / message_handler_mcast)")
+    print(f"    Sort-queue overflow events (ARU gap >= SQ_MAX): {_sq_overflow_events:,}")
+    print(f"    ARU gap peak: {_sq_hw_peak_pct*100:.1f}% of {QUEUE_RTR_ITEMS_SIZE_MAX} limit")
+    print(f"    ARU gap >90% events: {_sq_hw_90pct_events:,}   >95% events: {_sq_hw_95pct_events:,}")
+    if _sq_overflow_events > 0:
+        print(f"    TRIGGERED: sort queue was full; before pve6 fix, sq_item_add NULL was ignored,")
+        print(f"    causing mcast buffer leak AND unretransmittable messages sent to ring.")
+        print(f"    Status: FIXED in pve6 — buffers released, ERRORs logged.")
+    elif _sq_hw_95pct_events > 0:
+        print(f"    Near-miss: ARU gap reached >95% of limit ({_sq_hw_95pct_events} events).")
+        print(f"    Under higher load or longer stall, overflow would trigger BUG-12/13.")
+        print(f"    Status: pve6 fix handles the overflow path correctly.")
+    else:
+        print(f"    Sort queue stayed under 90% of limit — BUG-12/13 paths not hot in this run.")
+        print(f"    Status: FIXED in pve6.")
+
+    # BUG-14 (FIXED pve6)
+    print(f"\n  BUG-14: sq_items_release Wrap Path Miss-Count Leak (sq.h)")
+    print(f"    Seqno rollovers observed    : {_seqno_rollover_count}")
+    print(f"    Wraps with in-flight gaps   : {_sq_wrap_with_inflight}")
+    if _sq_wrap_with_inflight > 0:
+        print(f"    TRIGGERED: {_sq_wrap_with_inflight} times seqno wrapped while nodes had "
+              f"undelivered gaps.")
+        print(f"    Before pve6: items_miss_count not cleared on wrap — stale counts caused")
+        print(f"    spurious RTR requests for already-delivered seqnos after rollover.")
+        print(f"    Status: FIXED in pve6 — wrap path now clears both inuse[] and miss_count[].")
+    else:
+        print(f"    No rollovers with in-flight gaps — BUG-14 not triggered.")
+
+    # BUG-15
+    print(f"\n  BUG-15: Sort Queue High-Water Threshold")
+    print(f"    Peak ARU gap: {_sq_hw_peak_pct*100:.1f}% of QUEUE_RTR_ITEMS_SIZE_MAX={QUEUE_RTR_ITEMS_SIZE_MAX}")
+    print(f"    >90% events: {_sq_hw_90pct_events:,}   >95% events: {_sq_hw_95pct_events:,}")
+    if _sq_hw_95pct_events > 0:
+        print(f"    WARNING: {_sq_hw_95pct_events} rotations at >95% fill — cluster was 5% away from")
+        print(f"    silent message loss (fcc_rtr_limit zeros transmits, sq_in_range drops msgs).")
+        print(f"    Recommended: raise window_size so FCC throttles BEFORE gap reaches 90%.")
+    elif _sq_hw_90pct_events > 0:
+        print(f"    CAUTION: {_sq_hw_90pct_events} rotations at >90% fill.")
+
+    # BUG-16 (multi-slow-node)
+    if getattr(args, 'multi_slow', False):
+        print(f"\n  BUG-16: Multi-Slow-Node RTR Starvation")
+        print(f"    Multiple slow nodes degrade ARU independently; fairness cap prevents monopoly")
+        print(f"    but each node still consumes cap/2 RTR slots each rotation.")
+        slow_nodes_report = sorted(nodes, key=lambda n: n.stats.aru_stall_ms, reverse=True)[:5]
+        for n in slow_nodes_report:
+            if n.stats.aru_stall_ms > 0:
+                print(f"    node-{n.node_id:>3}: stall={n.stats.aru_stall_ms:.0f}ms "
+                      f"drop_prob={n.slow_drop_prob:.0%} drops={n.stats.msgs_dropped}")
+    else:
+        print(f"\n  BUG-16: Multi-Slow-Node RTR Starvation")
+        print(f"    Not tested — use --multi-slow to enable 3-slow-node scenario.")
+
+    # BUG-17
+    print(f"\n  BUG-17: Delivery Ordering Violations")
+    print(f"    Ordering violations detected: {_delivery_order_violations:,}")
+    if _delivery_order_violations > 0:
+        print(f"    CRITICAL: {_delivery_order_violations} instances where a node delivered seqno N")
+        print(f"    without having delivered all seqnos < N — TOTEM ordering guarantee violated!")
+        print(f"    Root cause: sq_item_add NULL return causes gap in sort queue; app delivered")
+        print(f"    past the gap when ARU advanced (wrongly, since gap seqno was never received).")
+    else:
+        print(f"    No ordering violations — TOTEM delivery guarantee maintained.")
+
+    # BUG-18
+    print(f"\n  BUG-18: Dynamic RTR Cap Cliff")
+    print(f"    RTR cap cliff events (>50% drop in cap): {_rtr_cap_cliff_events:,}")
+    if _rtr_cap_cliff_events > 0:
+        print(f"    Cluster shrank enough to halve the per-node RTR budget mid-recovery.")
+        print(f"    Recovery storms may overwhelm the reduced budget and extend downtime.")
+
+    # BUG-19
+    print(f"\n  BUG-19: FCC Window Undersize")
+    active_peak = sum(1 for n in nodes if not n.is_partitioned and not n.is_nic_flap)
+    ideal_window = MAX_MESSAGES * args.nodes
+    print(f"    max_messages × nodes = {MAX_MESSAGES} × {args.nodes} = {ideal_window}")
+    print(f"    Configured window_size = {WINDOW_SIZE}")
+    print(f"    FCC undersize rotations: {_fcc_window_undersize_events:,}")
+    if WINDOW_SIZE < ideal_window:
+        print(f"    WARNING: window_size ({WINDOW_SIZE}) < ideal ({ideal_window}).")
+        print(f"    FCC throttles most nodes every rotation — add to corosync.conf:")
+        print(f"      totem {{ window_size: {ideal_window} }}")
+    else:
+        print(f"    window_size is adequate for {args.nodes} nodes at max_messages={MAX_MESSAGES}.")
+
+    # FCC hysteresis note
+    print(f"\n  BUG-6 FIX STATUS: FCC Hysteresis (20% band)")
+    print(f"    FCC oscillation events (throttle↔unthrottle): {_fcc_oscillation_events:,}")
+    print(f"    Hysteresis fix APPLIED in this simulation run (unthrottle at gap < {int(WINDOW_SIZE*FCC_HYSTERESIS_RATIO)})")
+    if _fcc_oscillation_events == 0:
+        print(f"    Result: 0 oscillation events — hysteresis eliminated ping-pong throttle.")
+    else:
+        print(f"    Result: {_fcc_oscillation_events} transitions still occurred despite hysteresis.")
+
     # ---- Multi-failure summary ----
     if args.multi_fail:
         print(f"\n  === MULTI-FAILURE SCENARIO RESULTS ===")
@@ -1279,6 +1488,11 @@ def run_simulation(args) -> None:
     global _multi_failure_events, _concurrent_failures
     global _latency_histogram, _rotation_trace, _trace_log
     global _trace_enabled
+    global _sq_overflow_events, _sq_wrap_with_inflight
+    global _sq_hw_90pct_events, _sq_hw_95pct_events, _sq_hw_peak_pct
+    global _multi_slow_stall_ms, _delivery_order_violations, _prev_delivered
+    global _rtr_cap_cliff_events, _prev_rtr_cap
+    global _fcc_window_undersize_events, _fcc_throttle_state
 
     # Reset all globals
     _assert_fires = []; _frame_fires = []
@@ -1293,6 +1507,11 @@ def run_simulation(args) -> None:
     _multi_failure_events = _concurrent_failures = 0
     _latency_histogram = {}; _rotation_trace = []; _trace_log = []
     _trace_enabled = getattr(args, 'trace', False)
+    _sq_overflow_events = 0; _sq_wrap_with_inflight = 0
+    _sq_hw_90pct_events = _sq_hw_95pct_events = 0; _sq_hw_peak_pct = 0.0
+    _multi_slow_stall_ms = {}; _delivery_order_violations = 0; _prev_delivered = {}
+    _rtr_cap_cliff_events = 0; _prev_rtr_cap = RETRANSMIT_ENTRIES_MAX
+    _fcc_window_undersize_events = 0; _fcc_throttle_state = False
 
     rng = random.Random(args.seed)
     nodes: List[Node] = [Node(node_id=i + 1) for i in range(args.nodes)]
@@ -1301,6 +1520,15 @@ def run_simulation(args) -> None:
     rng.shuffle(pool)
     slow_node, partition_node, nic_node = pool[0], pool[1], pool[2]
     slow_node.is_slow = True
+
+    # Multi-slow-node scenario: add 2 more slow nodes with higher drop rates
+    extra_slow_nodes: List[Node] = []
+    if getattr(args, 'multi_slow', False):
+        extra_slow_nodes = pool[8:10]     # 2 additional slow nodes
+        extra_slow_nodes[0].is_slow = True
+        extra_slow_nodes[0].slow_drop_prob = 0.15  # 15% drop rate
+        extra_slow_nodes[1].is_slow = True
+        extra_slow_nodes[1].slow_drop_prob = 0.25  # 25% drop rate
 
     # Multi-fail scenario: pick additional nodes
     multi_fail_nodes_1: List[Node] = []
@@ -1556,6 +1784,8 @@ def main():
     p.add_argument("--fixed",       action="store_true",
                    help=f"use fork's fixed constants (rtr-max={RETRANSMIT_ENTRIES_MAX} "
                         f"window-size={WINDOW_SIZE})")
+    p.add_argument("--multi-slow",  action="store_true",
+                   help="add 2 extra slow nodes at 15%/25% drop prob (BUG-16 multi-slow test)")
     args = p.parse_args()
 
     if args.stress:
@@ -1581,6 +1811,8 @@ def main():
     # Normalise hyphen in argparse dest
     if not hasattr(args, 'multi_fail'):
         args.multi_fail = getattr(args, 'multi_fail', False)
+    if not hasattr(args, 'multi_slow'):
+        args.multi_slow = getattr(args, 'multi_slow', False)
 
     run_simulation(args)
 
