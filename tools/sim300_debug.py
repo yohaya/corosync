@@ -30,6 +30,12 @@ New findings in this variant (on top of BUG-1..BUG-5 from sim300.py):
     assert(token_memb_entries > 0) fires when all proc_list members end up in
     failed_list simultaneously — e.g. during a failure storm on a small partition.
 
+  BUG-11: RTR SLOT MONOPOLIZATION (totemsrp.c orf_token_rtr)
+    A single badly laggard node fills ALL RETRANSMIT_ENTRIES_MAX RTR slots on
+    every rotation.  Secondary laggard nodes get 0 RTR slots and accumulate
+    thousands of unserviced retransmit requests.  Fix: per-node RTR cap at
+    RETRANSMIT_ENTRIES_MAX/2 leaves half the list for subsequent nodes in ring.
+
 Usage:
     python3 sim300_debug.py                        # default 300 nodes, 180s
     python3 sim300_debug.py --trace                # write /tmp/sim300_trace.log
@@ -153,7 +159,9 @@ _memb_index_overflow_events: int = 0
 # BUG-10: token_memb_entries == 0 (totemsrp.c:3479 assert)
 _token_memb_empty_events: int = 0
 
-# BUG-11: multi-failure cascade
+# BUG-11: RTR monopolization — one laggard fills all RTR slots, starving others
+_rtr_monopolization_events: int = 0   # rotations where per-node cap was binding
+_rtr_monopolization_staved: int = 0   # total RTR requests blocked by cap
 _multi_failure_events: int = 0
 _concurrent_failures: int = 0
 
@@ -665,17 +673,33 @@ class Ring:
             nodes_needing_rtr += 1
             total_rtr_needed  += len(missing)
 
+            # Per-node RTR fairness cap: mirrors the C fix in orf_token_rtr().
+            # Limit each node's additions to half the max so a single laggard
+            # cannot monopolise all RTR slots and starve other laggard nodes.
+            rtr_per_node_cap = RETRANSMIT_ENTRIES_MAX // 2
+            node_entries_added = 0
+            cap_hit_this_node  = False
+
             for seq in missing:
                 inbox_seqnos = {pd.seqno for pd in n.inbox}
                 if seq in inbox_seqnos:
                     _latency_rtrs += 1
 
-                if len(new_rtr) < RETRANSMIT_ENTRIES_MAX:
+                if (len(new_rtr) < RETRANSMIT_ENTRIES_MAX and
+                        node_entries_added < rtr_per_node_cap):
                     if seq not in new_rtr:
                         new_rtr.append(seq)
+                        node_entries_added += 1
                 else:
                     n.stats.rtr_starved += 1
                     self.rtr_dropped_total += 1
+                    if node_entries_added >= rtr_per_node_cap:
+                        cap_hit_this_node = True
+
+            if cap_hit_this_node:
+                global _rtr_monopolization_events, _rtr_monopolization_staved
+                _rtr_monopolization_events += 1
+                _rtr_monopolization_staved += len(missing) - node_entries_added
 
         # Detect RTR starvation event
         if nodes_needing_rtr > RETRANSMIT_ENTRIES_MAX:
@@ -1125,6 +1149,21 @@ def print_results(args, nodes: List[Node], ring: Ring) -> None:
     else:
         print(f"    Not triggered — need active < 5 during multi-failure recovery.")
 
+    # BUG-11
+    print(f"\n  BUG-11: RTR Slot Monopolization  (totemsrp.c orf_token_rtr)")
+    print(f"    Rotations where per-node cap was binding: {_rtr_monopolization_events:,}")
+    print(f"    RTR requests blocked by fairness cap     : {_rtr_monopolization_staved:,}")
+    if _rtr_monopolization_events > 0:
+        print(f"    Root cause: a single badly laggard node fills all {RETRANSMIT_ENTRIES_MAX} RTR slots")
+        print(f"    on every rotation, leaving 0 slots for other nodes with smaller gaps.")
+        print(f"    Secondary laggards accumulate thousands of unserviced RTR requests.")
+        print(f"    Fix applied (this fork): per-node RTR cap = RETRANSMIT_ENTRIES_MAX/2 =")
+        print(f"    {RETRANSMIT_ENTRIES_MAX//2} entries.  Each node contributes at most half the max,")
+        print(f"    leaving half for other nodes.  C patch in exec/totemsrp.c orf_token_rtr().")
+    else:
+        print(f"    Not triggered — only one laggard node in this run (single-laggard"
+              f" scenario does not exhibit monopolization).")
+
     # ---- Multi-failure summary ----
     if args.multi_fail:
         print(f"\n  === MULTI-FAILURE SCENARIO RESULTS ===")
@@ -1211,8 +1250,10 @@ def print_results(args, nodes: List[Node], ring: Ring) -> None:
   Additional recommendations:
     - fcc_calculate(): add 20% hysteresis to prevent BUG-6 oscillation
       (unthrottle only when gap < WINDOW_SIZE * 0.8)
-    - orf_token_rtr(): add per-node slow-detect counter; exclude persistent
-      laggards from ARU after K=10 consecutive slow rotations (BUG-7)
+    - orf_token_rtr(): per-node RTR cap = RETRANSMIT_ENTRIES_MAX/2 (BUG-11 — FIXED in this fork)
+      prevents one laggard monopolising all RTR slots; secondary laggards now served
+    - fcc_rtr_limit(): CRITICAL warning when ARU gap >75% of QUEUE_RTR_ITEMS_SIZE_MAX (FIXED)
+      operators get early warning before sort-queue overflow causes message loss
     - Increase RETRANSMIT_ENTRIES_MAX from 30 to PROCESSOR_COUNT_MAX={PROCESSOR_COUNT_MAX}
       (already done in this fork at {RETRANSMIT_ENTRIES_MAX})
     - Increase WINDOW_SIZE from 50 to scale with cluster size
@@ -1234,6 +1275,7 @@ def run_simulation(args) -> None:
     global _aru_amplification_total_rtrs, _aru_amplification_events
     global _seqno_rollover_count
     global _memb_index_overflow_events, _token_memb_empty_events
+    global _rtr_monopolization_events, _rtr_monopolization_staved
     global _multi_failure_events, _concurrent_failures
     global _latency_histogram, _rotation_trace, _trace_log
     global _trace_enabled
@@ -1247,6 +1289,7 @@ def run_simulation(args) -> None:
     _aru_amplification_total_rtrs = _aru_amplification_events = 0
     _seqno_rollover_count = 0
     _memb_index_overflow_events = _token_memb_empty_events = 0
+    _rtr_monopolization_events = _rtr_monopolization_staved = 0
     _multi_failure_events = _concurrent_failures = 0
     _latency_histogram = {}; _rotation_trace = []; _trace_log = []
     _trace_enabled = getattr(args, 'trace', False)

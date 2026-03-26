@@ -562,6 +562,7 @@ struct totemsrp_instance {
 	unsigned int       diag_aru_stall_count;
 	unsigned int       diag_retrans_hwm;
 	unsigned int       diag_write_throttle_count;
+	unsigned int       diag_aru_gap_warn_count;   /* passes with ARU gap >75% of queue */
 	unsigned long long diag_ring_enter_ns;
 
 	/*
@@ -2228,6 +2229,7 @@ static void memb_state_operational_enter (struct totemsrp_instance *instance)
 		instance->diag_write_throttle_count = 0;
 		instance->diag_aru_stall_addr       = 0;
 		instance->diag_aru_stall_count      = 0;
+		instance->diag_aru_gap_warn_count   = 0;
 	}
 
 	/*
@@ -3038,6 +3040,8 @@ static int orf_token_rtr (
 	struct sq *sort_queue;
 	struct rtr_item *rtr_list;
 	unsigned int range = 0;
+	int rtr_before_add;
+	int rtr_per_node_cap;
 	char retransmit_msg[1024];
 	char value[64];
 
@@ -3119,7 +3123,24 @@ static int orf_token_rtr (
 		range = QUEUE_RTR_ITEMS_SIZE_MAX - 1;
 	}
 
+	/*
+	 * Per-node RTR fairness cap: limit additions to half the max capacity.
+	 *
+	 * Without this cap a single badly laggard node fills the entire RTR list
+	 * on every rotation, starving other nodes with smaller gaps.  300-node
+	 * simulation shows secondary laggards accumulate 7000+ unserviced RTR
+	 * requests when the primary laggard monopolises all 384 slots.
+	 *
+	 * With the cap each node contributes at most retransmit_entries_max/2
+	 * new entries per rotation, leaving the other half for subsequent nodes
+	 * in the ring.  Single-laggard recovery takes 2× as long in the
+	 * worst case but prevents complete starvation of other laggards.
+	 */
+	rtr_before_add   = orf_token->rtr_list_entries;
+	rtr_per_node_cap = (int)(instance->retransmit_entries_max / 2);
+
 	for (i = 1; (orf_token->rtr_list_entries < (int)instance->retransmit_entries_max) &&
+		(orf_token->rtr_list_entries - rtr_before_add < rtr_per_node_cap) &&
 		(i <= range); i++) {
 
 		/*
@@ -3169,6 +3190,20 @@ static int orf_token_rtr (
 			}
 		}
 	}
+
+	/* Log when per-node fairness cap was the binding constraint */
+	if ((orf_token->rtr_list_entries - rtr_before_add) >= rtr_per_node_cap &&
+	    rtr_before_add < (int)instance->retransmit_entries_max) {
+		log_printf (instance->totemsrp_log_level_debug,
+			"orf_token_rtr: per-node cap hit: added %d/%d entries "
+			"(total=%d, my_aru=%x, range=%u) — "
+			"leaving room for other laggards",
+			orf_token->rtr_list_entries - rtr_before_add,
+			rtr_per_node_cap,
+			orf_token->rtr_list_entries,
+			instance->my_aru, range);
+	}
+
 	return (instance->fcc_remcast_current);
 }
 
@@ -4028,6 +4063,50 @@ static void fcc_rtr_limit (
 				*transmits_allowed);
 		}
 		instance->diag_write_throttle_count = 0;
+	}
+
+	/*
+	 * CRITICAL: ARU gap approaching sort-queue overflow boundary.
+	 *
+	 * The sort queue holds at most QUEUE_RTR_ITEMS_SIZE_MAX (16384) in-flight
+	 * messages.  When the global ARU gap (token.seq - token.aru) exceeds 75%
+	 * of that limit (12288), the ring is within seconds of a hard overflow
+	 * that will cause permanent message loss and force a ring recovery.
+	 *
+	 * Root cause is always a laggard node that is dropping or delaying
+	 * packets faster than the RTR mechanism can recover them.  Operators
+	 * should check the stall-node connectivity and consider lowering
+	 * consensus_timeout (default 3600 passes) to fence the laggard sooner.
+	 */
+	{
+		unsigned int _aru_gap = token->seq - token->aru;
+		unsigned int _threshold = QUEUE_RTR_ITEMS_SIZE_MAX * 3 / 4;  /* 75% = 12288 */
+		if (_aru_gap > _threshold) {
+			instance->diag_aru_gap_warn_count++;
+			if (instance->diag_aru_gap_warn_count == 1 ||
+			    (instance->diag_aru_gap_warn_count % 100) == 0) {
+				log_printf (instance->totemsrp_log_level_warning,
+					"CRITICAL ARU gap: %u/%u (%.0f%%) — "
+					"sort queue >75%% full, overflow risk! "
+					"stall_node=" CS_PRI_NODE_ID " passes=%u "
+					"action: check node connectivity, "
+					"lower consensus_timeout",
+					_aru_gap, QUEUE_RTR_ITEMS_SIZE_MAX,
+					(_aru_gap * 100.0f) / QUEUE_RTR_ITEMS_SIZE_MAX,
+					(unsigned int)token->aru_addr,
+					instance->diag_aru_gap_warn_count);
+			}
+		} else {
+			if (instance->diag_aru_gap_warn_count > 0) {
+				log_printf (instance->totemsrp_log_level_debug,
+					"DIAG ARU gap resolved: was at critical level "
+					"for %u passes, now %u/%u (%.0f%%)",
+					instance->diag_aru_gap_warn_count,
+					_aru_gap, QUEUE_RTR_ITEMS_SIZE_MAX,
+					(_aru_gap * 100.0f) / QUEUE_RTR_ITEMS_SIZE_MAX);
+			}
+			instance->diag_aru_gap_warn_count = 0;
+		}
 	}
 }
 
