@@ -891,10 +891,28 @@ static void downlist_inform_clients (void)
 			pcd = (struct confchg_data *)qb_map_get(group_map, cpg_group.value);
 			if (pcd == NULL) {
 				pcd = (struct confchg_data *)calloc(1, sizeof(struct confchg_data));
+				if (pcd == NULL) {
+					log_printf(LOGSYS_LEVEL_CRIT,
+					    "cpg: out of memory in downlist_inform_clients — "
+					    "skipping left notification for nodeid %u",
+					    left_pi->nodeid);
+					qb_list_del(&left_pi->list);
+					free(left_pi);
+					continue;
+				}
 				memcpy(&pcd->cpg_group, &cpg_group, sizeof(struct cpg_name));
 				qb_map_put(group_map, pcd->cpg_group.value, pcd);
 			}
 			size = pcd->left_list_entries;
+			if (size >= CPG_MEMBERS_MAX) {
+				log_printf(LOGSYS_LEVEL_ERROR,
+				    "cpg: left_list overflow (entries=%d >= CPG_MEMBERS_MAX=%d) — "
+				    "dropping left notification for nodeid %u",
+				    size, CPG_MEMBERS_MAX, left_pi->nodeid);
+				qb_list_del(&left_pi->list);
+				free(left_pi);
+				continue;
+			}
 			pcd->left_list[size].nodeid = left_pi->nodeid;
 			pcd->left_list[size].pid = left_pi->pid;
 			pcd->left_list[size].reason = CONFCHG_CPG_REASON_NODEDOWN;
@@ -1246,10 +1264,24 @@ static void do_proc_join(
 		struct join_list_confchg_data *jld = qb_map_get(group_notify_map, pi->group.value);
 		if (jld == NULL) {
 			jld = (struct join_list_confchg_data *)calloc(1, sizeof(struct join_list_confchg_data));
+			if (jld == NULL) {
+				log_printf(LOGSYS_LEVEL_CRIT,
+				    "cpg: out of memory in do_proc_join — "
+				    "cannot track join notification for nodeid %u pid %u",
+				    nodeid, pid);
+				return;
+			}
 			memcpy(&jld->cpg_group, &pi->group, sizeof(mar_cpg_name_t));
 			qb_map_put(group_notify_map, jld->cpg_group.value, jld);
 		}
 		size = jld->join_list_entries;
+		if (size >= CPG_MEMBERS_MAX) {
+			log_printf(LOGSYS_LEVEL_ERROR,
+			    "cpg: join_list overflow (entries=%d >= CPG_MEMBERS_MAX=%d) — "
+			    "dropping join notification for nodeid %u pid %u",
+			    size, CPG_MEMBERS_MAX, nodeid, pid);
+			return;
+		}
 		jld->join_list[size].nodeid = notify_info.nodeid;
 		jld->join_list[size].pid = notify_info.pid;
 		jld->join_list[size].reason = notify_info.reason;

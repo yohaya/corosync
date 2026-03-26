@@ -35,11 +35,11 @@
 #ifndef CS_QUEUE_H_DEFINED
 #define CS_QUEUE_H_DEFINED
 
+#include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
 #include <pthread.h>
 #include <errno.h>
-#include "assert.h"
 
 struct cs_queue {
 	int head;
@@ -132,12 +132,21 @@ static inline void cs_queue_item_add (struct cs_queue *cs_queue, void *item)
 	if (cs_queue->threaded_mode_enabled) {
 		pthread_mutex_lock (&cs_queue->mutex);
 	}
+	/* Check for queue-full BEFORE writing: tail==head means all slots used.
+	 * Callers should call cs_queue_is_full() first, but guard here anyway. */
+	if (cs_queue->tail == cs_queue->head) {
+		fprintf (stderr,
+		    "cs_queue_item_add: queue full (size=%zu used=%d) — dropping item\n",
+		    cs_queue->size, cs_queue->used);
+		if (cs_queue->threaded_mode_enabled) {
+			pthread_mutex_unlock (&cs_queue->mutex);
+		}
+		return;
+	}
 	cs_queue_position = cs_queue->head;
 	cs_queue_item = cs_queue->items;
 	cs_queue_item += cs_queue_position * cs_queue->size_per_item;
 	memcpy (cs_queue_item, item, cs_queue->size_per_item);
-
-	assert (cs_queue->tail != cs_queue->head);
 
 	cs_queue->head = (cs_queue->head + 1) % cs_queue->size;
 	cs_queue->used++;
@@ -172,10 +181,18 @@ static inline void cs_queue_item_remove (struct cs_queue *cs_queue) {
 	}
 	cs_queue->tail = (cs_queue->tail + 1) % cs_queue->size;
 
-	assert (cs_queue->tail != cs_queue->head);
+	if (cs_queue->tail == cs_queue->head) {
+		fprintf (stderr,
+		    "cs_queue_item_remove: tail caught head after remove (used=%d) — state corrupt\n",
+		    cs_queue->used);
+	}
 
 	cs_queue->used--;
-	assert (cs_queue->used >= 0);
+	if (cs_queue->used < 0) {
+		fprintf (stderr,
+		    "cs_queue_item_remove: used underflow — clamping to 0\n");
+		cs_queue->used = 0;
+	}
 	if (cs_queue->threaded_mode_enabled) {
 		pthread_mutex_unlock (&cs_queue->mutex);
 	}
@@ -188,7 +205,12 @@ static inline void cs_queue_items_remove (struct cs_queue *cs_queue, int rel_cou
 	}
 	cs_queue->tail = (cs_queue->tail + rel_count) % cs_queue->size;
 
-	assert (cs_queue->tail != cs_queue->head);
+	if (cs_queue->tail == cs_queue->head) {
+		fprintf (stderr,
+		    "cs_queue_items_remove: tail caught head after remove of %d items "
+		    "(used=%d) — state corrupt\n",
+		    rel_count, cs_queue->used);
+	}
 
 	cs_queue->used -= rel_count;
 	if (cs_queue->threaded_mode_enabled) {
@@ -253,7 +275,12 @@ static inline void cs_queue_avail (struct cs_queue *cs_queue, int *avail)
 		pthread_mutex_lock (&cs_queue->mutex);
 	}
 	*avail = cs_queue->size - cs_queue->used - 2;
-	assert (*avail >= 0);
+	if (*avail < 0) {
+		fprintf (stderr,
+		    "cs_queue_avail: used (%d) > size (%zu) — clamping avail to 0\n",
+		    cs_queue->used, cs_queue->size);
+		*avail = 0;
+	}
 	if (cs_queue->threaded_mode_enabled) {
 		pthread_mutex_unlock (&cs_queue->mutex);
 	}

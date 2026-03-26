@@ -215,6 +215,9 @@ static void totemknet_instance_initialize (struct totemknet_instance *instance)
 	int res;
 
 	memset (instance, 0, sizeof (struct totemknet_instance));
+	/* Sentinel: distinguishes "pipe not yet created" from fd 0 (stdin) */
+	instance->logpipes[0] = -1;
+	instance->logpipes[1] = -1;
 	res = pthread_mutex_init(&instance->log_mutex, NULL);
 	/*
 	 * There is not too much else what can be done.
@@ -1052,8 +1055,8 @@ static int totemknet_set_knet_crypto(struct totemknet_instance *instance)
 
 	/* These have already been validated */
 	memcpy(crypto_cfg.crypto_model, instance->totem_config->crypto_model, sizeof(crypto_cfg.crypto_model));
-	memcpy(crypto_cfg.crypto_cipher_type, instance->totem_config->crypto_cipher_type, sizeof(crypto_cfg.crypto_model));
-	memcpy(crypto_cfg.crypto_hash_type, instance->totem_config->crypto_hash_type, sizeof(crypto_cfg.crypto_model));
+	memcpy(crypto_cfg.crypto_cipher_type, instance->totem_config->crypto_cipher_type, sizeof(crypto_cfg.crypto_cipher_type));
+	memcpy(crypto_cfg.crypto_hash_type, instance->totem_config->crypto_hash_type, sizeof(crypto_cfg.crypto_hash_type));
 	memcpy(crypto_cfg.private_key, instance->totem_config->private_key, instance->totem_config->private_key_len);
 	crypto_cfg.private_key_len = instance->totem_config->private_key_len;
 
@@ -1394,6 +1397,13 @@ int totemknet_initialize (
 	return (0);
 
 exit_error:
+	/* Close logpipes if they were successfully opened; fd==-1 means not yet created */
+	if (instance->logpipes[0] >= 0) {
+		close(instance->logpipes[0]);
+	}
+	if (instance->logpipes[1] >= 0) {
+		close(instance->logpipes[1]);
+	}
 	log_flush_messages(instance);
 	free(instance);
 	return (-1);
@@ -1566,6 +1576,7 @@ int totemknet_member_add (
 	int addrlen;
 	int i;
 	int host_found = 0;
+	int host_newly_added = 0;
 	knet_node_id_t host_ids[KNET_MAX_HOST];
 	size_t num_host_ids;
 
@@ -1602,6 +1613,9 @@ int totemknet_member_add (
 			KNET_LOGSYS_PERROR(errno, LOGSYS_LEVEL_ERROR, "knet_host_add");
 			return -1;
 		}
+		if (err == 0) {
+			host_newly_added = 1;
+		}
 	} else {
 		knet_log_printf (LOGSYS_LEVEL_DEBUG, "nodeid " CS_PRI_NODE_ID " already added", member->nodeid);
 	}
@@ -1634,6 +1648,15 @@ int totemknet_member_add (
 	}
 	if (err) {
 		KNET_LOGSYS_PERROR(errno, LOGSYS_LEVEL_ERROR, "knet_link_set_config failed");
+		/* Clean up the partially-configured host to avoid leaving knet in an
+		 * inconsistent state (host added but no link configured). */
+		if (host_newly_added) {
+			if (knet_host_remove(instance->knet_handle, member->nodeid) != 0) {
+				KNET_LOGSYS_PERROR(errno, LOGSYS_LEVEL_ERROR,
+				    "knet_host_remove cleanup failed for nodeid " CS_PRI_NODE_ID,
+				    member->nodeid);
+			}
+		}
 		return -1;
 	}
 

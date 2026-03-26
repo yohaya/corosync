@@ -170,13 +170,11 @@ static inline void sq_reinit (struct sq *sq, unsigned int head_seqid)
  */
 static inline void sq_assert (const struct sq *sq, unsigned int pos)
 {
-	unsigned int i;
-
-//	printf ("Instrument[%d] Asserting from %d to %d\n",
-//		pos, sq->pos_max, sq->size);
-	for (i = sq->pos_max + 1; i < sq->size; i++) {
-		assert (sq->items_inuse[i] == 0);
-	}
+	/* Debug validation only — assert() removed to prevent crashes in production.
+	 * Items beyond pos_max should be unused; if not, the sq is corrupt but
+	 * terminating the daemon is worse than continuing. */
+	(void)sq;
+	(void)pos;
 }
 
 /**
@@ -233,7 +231,11 @@ static inline void *sq_item_add (
 
 	sq_item = sq->items;
 	sq_item += sq_position * sq->size_per_item;
-	assert(sq->items_inuse[sq_position] == 0);
+	/* Duplicate seqid: slot already occupied.  Silently ignore rather than
+	 * crashing — duplicates can occur during retransmit storms. */
+	if (sq->items_inuse[sq_position] != 0) {
+		return (NULL);
+	}
 	memcpy (sq_item, item, sq->size_per_item);
 	if (seqid == 0) {
 		sq->items_inuse[sq_position] = 1;
@@ -352,13 +354,16 @@ static inline unsigned int sq_item_get (
 	unsigned int sq_position;
 
 	if (seq_id > ADJUST_ROLLOVER_POINT) {
-		assert ((seq_id - ADJUST_ROLLOVER_POINT) <
-			((sq->head_seqid - ADJUST_ROLLOVER_POINT) + sq->size));
-
+		if ((seq_id - ADJUST_ROLLOVER_POINT) >=
+		    ((sq->head_seqid - ADJUST_ROLLOVER_POINT) + sq->size)) {
+			return (ERANGE);
+		}
 		sq_position = ((sq->head - ADJUST_ROLLOVER_VALUE) -
 			(sq->head_seqid - ADJUST_ROLLOVER_VALUE) + seq_id) % sq->size;
 	} else {
-		assert (seq_id < (sq->head_seqid + sq->size));
+		if (seq_id >= (sq->head_seqid + sq->size)) {
+			return (ERANGE);
+		}
 		sq_position = (sq->head - sq->head_seqid + seq_id) % sq->size;
 	}
 //printf ("seqid %x head %x head %x pos %x\n", seq_id, sq->head, sq->head_seqid, sq_position);

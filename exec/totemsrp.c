@@ -3865,13 +3865,21 @@ static int fcc_calculate (
 
 	/*
 	 * Only do backlog calculation if there is a backlog otherwise
-	 * we would result in div by zero
+	 * we would result in div by zero.
+	 *
+	 * Guard against unsigned underflow: if my_pbl > (backlog + my_cbl), the
+	 * denominator would wrap to a huge number producing backlog_calc=0 and
+	 * skipping throttle — correct behaviour, but the wrapped comparison would
+	 * also make the if() branch enter spuriously.  Use a signed guard instead.
 	 */
-	if (token->backlog + instance->my_cbl - instance->my_pbl) {
-		backlog_calc = (instance->totem_config->window_size * instance->my_pbl) /
-			(token->backlog + instance->my_cbl - instance->my_pbl);
-		if (backlog_calc > 0 && transmits_allowed > backlog_calc) {
-			transmits_allowed = backlog_calc;
+	if (instance->my_pbl <= token->backlog + instance->my_cbl) {
+		unsigned int denom = token->backlog + instance->my_cbl - instance->my_pbl;
+		if (denom > 0) {
+			backlog_calc = (instance->totem_config->window_size * instance->my_pbl) /
+				denom;
+			if (backlog_calc > 0 && transmits_allowed > backlog_calc) {
+				transmits_allowed = backlog_calc;
+			}
 		}
 	}
 

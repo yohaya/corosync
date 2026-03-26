@@ -275,9 +275,13 @@ static int32_t sig_exit_handler (int num, void *data)
 
 static void sigsegv_handler (int num)
 {
+	static const char msg[] =
+	    "corosync: caught fatal signal — writing blackbox and aborting\n";
 	(void)signal (num, SIG_DFL);
+	/* write() is async-signal-safe; qb_log_fini() and log_printf() are NOT.
+	 * qb_log_fini() may deadlock if we crashed inside a qb_log call. */
+	(void)write (STDERR_FILENO, msg, sizeof (msg) - 1);
 	corosync_blackbox_write_to_file ();
-	qb_log_fini();
 	raise (num);
 }
 

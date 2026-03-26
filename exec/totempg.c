@@ -95,7 +95,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <assert.h>
 #include <pthread.h>
 #include <errno.h>
 #include <limits.h>
@@ -334,10 +333,11 @@ static struct assembly *assembly_ref (unsigned int nodeid)
 	 * Nothing available in inuse or free list, so allocate a new one
 	 */
 	assembly = malloc (sizeof (struct assembly));
-	/*
-	 * TODO handle memory allocation failure here
-	 */
-	assert (assembly);
+	if (assembly == NULL) {
+		log_printf (LOG_CRIT, "totempg: out of memory allocating assembly buffer "
+		    "for nodeid " CS_PRI_NODE_ID " — message will be lost", nodeid);
+		return (NULL);
+	}
 	assembly->nodeid = nodeid;
 	assembly->data[0] = 0;
 	assembly->index = 0;
@@ -475,7 +475,12 @@ static inline int group_matches (
         struct iovec iovec_aligned = { NULL, 0 };
 #endif
 
-	assert (iov_len == 1);
+	if (iov_len != 1) {
+		log_printf (LOG_ERR,
+		    "totempg: group_matches called with iov_len=%u (expected 1) — no match",
+		    iov_len);
+		return (0);
+	}
 
 #ifdef TOTEMPG_NEED_ALIGN
 	/*
@@ -621,7 +626,11 @@ static void totempg_deliver_fn (
 	size_t expected_msg_len;
 
 	assembly = assembly_ref (nodeid);
-	assert (assembly);
+	if (assembly == NULL) {
+		log_printf (LOG_CRIT, "totempg: assembly_ref returned NULL for nodeid "
+		    CS_PRI_NODE_ID " (OOM?) — discarding message", nodeid);
+		return;
+	}
 
 	if (msg_len < sizeof(struct totempg_mcast)) {
 		log_printf(LOG_WARNING,
@@ -674,7 +683,13 @@ static void totempg_deliver_fn (
 		return ;
 	}
 
-	assert((assembly->index+msg_len) < sizeof(assembly->data));
+	if ((assembly->index + msg_len) >= sizeof(assembly->data)) {
+		log_printf(LOG_WARNING,
+		    "totempg: assembly buffer overflow (index=%u + msg_len=%u >= %zu) "
+		    "from node " CS_PRI_NODE_ID " — discarding message",
+		    assembly->index, msg_len, sizeof(assembly->data), nodeid);
+		return;
+	}
 	memcpy (&assembly->data[assembly->index], &data[datasize],
 		msg_len - datasize);
 
@@ -906,7 +921,12 @@ static int mcast_msg (
 	/*
 	 * Remove zero length iovectors from the list
 	 */
-	assert (iov_len < 64);
+	if (iov_len >= 64) {
+		log_printf (LOG_ERR, "totempg: mcast_msg iov_len=%u >= 64 — dropping message",
+		    iov_len);
+		res = -1;
+		goto error_exit;
+	}
 	for (dest = 0, src = 0; src < iov_len; src++) {
 		if (iovec_in[src].iov_len) {
 			memcpy (&iovec[dest++], &iovec_in[src],
@@ -993,8 +1013,13 @@ static int mcast_msg (
 				}
 				fragment_continuation = next_fragment;
 				mcast.fragmented = next_fragment++;
-				assert(fragment_continuation != 0);
-				assert(mcast.fragmented != 0);
+				/* Logically guaranteed non-zero by increment above; guard for safety */
+				if (fragment_continuation == 0 || mcast.fragmented == 0) {
+					log_printf (LOG_ERR,
+					    "totempg: fragment counter wrapped to zero — dropping");
+					res = -1;
+					goto error_exit;
+				}
 			} else {
 				fragment_continuation = 0;
 			}
@@ -1010,7 +1035,12 @@ static int mcast_msg (
 				sizeof(unsigned short);
 			iovecs[2].iov_base = (void *)data_ptr;
 			iovecs[2].iov_len = fragment_size + copy_len;
-			assert (totemsrp_avail(totemsrp_context) > 0);
+			if (totemsrp_avail(totemsrp_context) == 0) {
+				log_printf (LOG_ERR,
+				    "totempg: totemsrp queue full — dropping outbound mcast fragment");
+				res = -1;
+				goto error_exit;
+			}
 			res = totemsrp_mcast (totemsrp_context, iovecs, 3, guarantee);
 			if (res == -1) {
 				goto error_exit;

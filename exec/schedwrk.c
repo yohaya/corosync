@@ -70,10 +70,12 @@ static int schedwrk_do (enum totem_callback_token_type type, const void *context
 	if (instance->lock)
 		serialize_unlock ();
 
+	/* Put handle back BEFORE destroying so reference count reaches zero cleanly.
+	 * Calling hdb_handle_destroy() first then hdb_handle_put() is use-after-free. */
+	hdb_handle_put (&schedwrk_instance_database, handle);
 	if (res == 0) {
 		hdb_handle_destroy (&schedwrk_instance_database, handle);
 	}
-        hdb_handle_put (&schedwrk_instance_database, handle);
 	return (res);
 
 error_exit:
