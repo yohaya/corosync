@@ -3845,6 +3845,18 @@ static int fcc_calculate (
 
 	transmits_allowed = instance->totem_config->max_messages;
 
+	/*
+	 * Guard against unsigned underflow: when token->fcc has already
+	 * reached or exceeded window_size (possible under burst traffic or
+	 * after a slow node held the token), the subtraction would wrap to
+	 * a huge positive number and the condition below would be false —
+	 * allowing this node to send max_messages even though the cluster-
+	 * wide FCC budget is already exhausted.  Clamp to 0 instead.
+	 */
+	if (token->fcc >= instance->totem_config->window_size) {
+		return (0);
+	}
+
 	if (transmits_allowed > instance->totem_config->window_size - token->fcc) {
 		transmits_allowed = instance->totem_config->window_size - token->fcc;
 	}
@@ -4085,8 +4097,13 @@ static int check_memb_commit_token_sanity(
 	if (msg_len < sizeof(struct memb_commit_token)) {
 		log_printf (instance->totemsrp_log_level_security,
 		    "Received memb_commit_token message is too short...  ignoring.");
-
-		return (0);
+		/*
+		 * BUG FIX: was returning 0 (success) here, allowing the caller
+		 * to continue processing a truncated token whose addr_entries
+		 * field would be read from uninitialized receive-buffer memory.
+		 * Must return -1 so the caller discards the message.
+		 */
+		return (-1);
 	}
 
 	addr_entries= mct_msg->addr_entries;

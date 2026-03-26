@@ -931,7 +931,7 @@ static int calculate_quorum(int allow_decrease, unsigned int max_expected, unsig
 		}
 	}
 
-	if (us->flags & NODE_FLAGS_QDEVICE_CAST_VOTE) {
+	if ((us->flags & NODE_FLAGS_QDEVICE_CAST_VOTE) && qdevice) {
 		log_printf(LOGSYS_LEVEL_DEBUG, "node 0 state=1, votes=%u", qdevice->votes);
 		total_votes += qdevice->votes;
 		total_nodes++;
@@ -1090,7 +1090,7 @@ static void get_total_votes(unsigned int *totalvotes, unsigned int *current_memb
 		}
 	}
 
-	if (qdevice->votes) {
+	if (qdevice && qdevice->votes) {
 		total_votes += qdevice->votes;
 		cluster_members++;
 	}
@@ -1815,7 +1815,7 @@ static int votequorum_exec_send_quorum_notification(void *conn, uint64_t context
 		res_lib_votequorum_notification->node_list[i].nodeid = node->node_id;
 		res_lib_votequorum_notification->node_list[i++].state = node->state;
         }
-	if (us->flags & NODE_FLAGS_QDEVICE_REGISTERED) {
+	if ((us->flags & NODE_FLAGS_QDEVICE_REGISTERED) && qdevice) {
 		res_lib_votequorum_notification->node_list[i].nodeid = VOTEQUORUM_QDEVICE_NODEID;
 		res_lib_votequorum_notification->node_list[i++].state = qdevice->state;
 	}

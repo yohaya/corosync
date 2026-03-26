@@ -1,7 +1,8 @@
 name: Build and Release Debian Packages
 
-# Trigger on every push to stability-fixes (produces dev artifacts)
-# and on version tags (produces official releases)
+# Every push to stability-fixes creates/updates a rolling "latest" pre-release
+# with ready-to-install .deb files.  Pushing a version tag (v*) creates a
+# permanent, versioned release.
 on:
   push:
     branches: [ stability-fixes ]
@@ -11,13 +12,13 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Release tag (e.g. v3.1.10-pve1)'
+        description: 'Release tag (e.g. v3.1.10-pve1) — leave blank for rolling latest'
         required: false
 
 permissions:
-  contents: write   # needed to create releases and upload assets
+  contents: write   # needed to create/update releases and upload assets
 
-# Cancel in-progress runs on the same branch to avoid duplicates
+# Cancel in-progress runs on the same branch to avoid duplicate releases
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -74,13 +75,12 @@ jobs:
             xsltproc \
             ca-certificates \
             lsb-release
-          # Print versions for debugging
           dpkg -l libqb-dev libknet1-dev | tail -3
 
       - name: Checkout source
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0   # full history needed for git-version-gen
+          fetch-depth: 0
 
       # ---- derive version strings ----
       - name: Compute package version
@@ -103,42 +103,40 @@ jobs:
           fi
 
           BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-          echo "pkg_ver=${PKG_VER}"  >> "$GITHUB_OUTPUT"
-          echo "build_date=${BUILD_DATE}" >> "$GITHUB_OUTPUT"
+          echo "pkg_ver=${PKG_VER}"        >> "$GITHUB_OUTPUT"
+          echo "build_date=${BUILD_DATE}"  >> "$GITHUB_OUTPUT"
           echo "Building package version: ${PKG_VER} for ${DISTRO}"
 
       # ---- patch changelog to embed correct version + distro ----
       - name: Update debian/changelog
         shell: bash
         run: |
-          PKG_VER="${{ steps.pkgver.outputs.pkg_ver }}"
-          DISTRO="${{ matrix.pkg_distro }}"
-          DATE=$(date -R)
-
-          # Replace first line with versioned, correctly-targeted entry
           python3 - <<'PYEOF'
-import re, sys
+          import sys
 
-with open("debian/changelog") as f:
-    content = f.read()
+          with open("debian/changelog") as f:
+              content = f.read()
 
-pkg_ver  = "${{ steps.pkgver.outputs.pkg_ver }}"
-distro   = "${{ matrix.pkg_distro }}"
-label    = "${{ matrix.label }}"
-date     = "$(date -R)"
-short    = "$(git rev-parse --short HEAD 2>/dev/null || echo 'unknown')"
+          import subprocess, datetime
+          pkg_ver = "${{ steps.pkgver.outputs.pkg_ver }}"
+          distro  = "${{ matrix.pkg_distro }}"
+          label   = "${{ matrix.label }}"
+          date    = subprocess.check_output(["date", "-R"]).decode().strip()
+          short   = subprocess.check_output(
+              ["git", "rev-parse", "--short", "HEAD"],
+              stderr=subprocess.DEVNULL
+          ).decode().strip()
 
-new_header = (
-    f"corosync ({pkg_ver}) {distro}; urgency=medium\n\n"
-    f"  * Automated build for {label}\n"
-    f"  * Commit: {short}\n\n"
-    f" -- Corosync Stability Fork <users@clusterlabs.org>  {date}\n\n"
-)
+          new_header = (
+              f"corosync ({pkg_ver}) {distro}; urgency=medium\n\n"
+              f"  * Automated build for {label}\n"
+              f"  * Commit: {short}\n\n"
+              f" -- Corosync Stability Fork <users@clusterlabs.org>  {date}\n\n"
+          )
 
-# Prepend new entry, keep the rest
-with open("debian/changelog", "w") as f:
-    f.write(new_header + content)
-PYEOF
+          with open("debian/changelog", "w") as f:
+              f.write(new_header + content)
+          PYEOF
           echo "--- debian/changelog head ---"
           head -8 debian/changelog
 
@@ -148,8 +146,7 @@ PYEOF
 
       # ---- build the Debian binary packages ----
       - name: Build Debian packages
-        run: |
-          dpkg-buildpackage -b -uc -us -j$(nproc)
+        run: dpkg-buildpackage -b -uc -us -j$(nproc)
 
       # ---- collect .deb files and rename to include distro ----
       - name: Collect and rename packages
@@ -168,7 +165,6 @@ PYEOF
             echo "  $dest"
           done
 
-          # Also copy .buildinfo and .changes for reproducibility
           for f in ../*.buildinfo ../*.changes; do
             [ -f "$f" ] && cp "$f" dist/ || true
           done
@@ -185,17 +181,22 @@ PYEOF
           retention-days: 90
 
   # -----------------------------------------------------------------------
-  # Release: gather all artifacts and publish a GitHub Release
-  # Only runs on tag pushes and workflow_dispatch with a tag
+  # Release: publish to GitHub Releases
+  #
+  # Branch push  → updates the rolling "latest" pre-release (always current)
+  # Tag push     → creates a permanent versioned release
+  # workflow_dispatch → same as branch push unless a tag input is given
+  #
+  # NOT run on pull_request events (no write permission for forks).
   # -----------------------------------------------------------------------
   release:
     name: Publish GitHub Release
     needs: build
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    if: github.event_name != 'pull_request'
 
     steps:
-      - name: Checkout (for release notes)
+      - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -209,103 +210,108 @@ PYEOF
       - name: List release assets
         run: find release-assets -name '*.deb' | sort
 
-      - name: Determine release tag
-        id: tag
+      # Decide tag name, release name, and prerelease flag
+      - name: Determine release metadata
+        id: meta
         shell: bash
         run: |
+          SHORT=$(git rev-parse --short HEAD)
+          DATE=$(date -u +%Y-%m-%d)
+
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
-            echo "tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
-            echo "prerelease=false" >> "$GITHUB_OUTPUT"
-          else
+            # Versioned release
+            TAG="${GITHUB_REF#refs/tags/}"
+            echo "tag=${TAG}"                                         >> "$GITHUB_OUTPUT"
+            echo "name=Corosync Stability Fork ${TAG}"                >> "$GITHUB_OUTPUT"
+            echo "prerelease=false"                                    >> "$GITHUB_OUTPUT"
+          elif [[ -n "${{ github.event.inputs.tag }}" ]]; then
+            # Manual dispatch with explicit tag
             TAG="${{ github.event.inputs.tag }}"
-            if [[ -z "$TAG" ]]; then
-              TAG="v3.1.10-dev-$(git rev-parse --short HEAD)"
-            fi
-            echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+            echo "tag=${TAG}"                                         >> "$GITHUB_OUTPUT"
+            echo "name=Corosync Stability Fork ${TAG}"                >> "$GITHUB_OUTPUT"
+            echo "prerelease=false"                                    >> "$GITHUB_OUTPUT"
+          else
+            # Rolling latest — always updates the same pre-release entry
+            echo "tag=latest"                                         >> "$GITHUB_OUTPUT"
+            echo "name=Corosync Stability Fork — latest (${DATE} ${SHORT})" >> "$GITHUB_OUTPUT"
+            echo "prerelease=true"                                     >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Create GitHub Release
+      # For the rolling "latest" tag we must move the lightweight git tag
+      # before softprops can update the release.  Versioned tags already
+      # exist and must not be force-moved.
+      - name: Move 'latest' git tag to current commit
+        if: steps.meta.outputs.tag == 'latest'
+        shell: bash
+        run: |
+          git config user.email "actions@github.com"
+          git config user.name  "GitHub Actions"
+          git tag -f latest
+          git push origin --force refs/tags/latest
+
+      - name: Create or update GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name:   ${{ steps.tag.outputs.tag }}
-          name:       "Corosync Stability Fork ${{ steps.tag.outputs.tag }}"
-          prerelease: ${{ steps.tag.outputs.prerelease }}
-          files:      release-assets/*.deb
+          tag_name:             ${{ steps.meta.outputs.tag }}
+          name:                 ${{ steps.meta.outputs.name }}
+          prerelease:           ${{ steps.meta.outputs.prerelease }}
+          files:                release-assets/*.deb
+          fail_on_unmatched_files: false
           body: |
-            ## Corosync Stability Fork ${{ steps.tag.outputs.tag }}
+            ## ${{ steps.meta.outputs.name }}
 
-            Based on upstream corosync **v3.1.10** with stability and memory fixes
-            targeted at large-scale Proxmox VE clusters (50+ nodes).
+            Based on upstream corosync **v3.1.10** with stability, memory, and
+            scalability fixes for large-scale Proxmox VE clusters (50+ nodes).
+
+            > **Pre-release** builds are updated on every commit to `stability-fixes`.
+            > For production use, pin to a versioned tag (e.g. `v3.1.10-pve1`).
 
             ---
 
-            ### Installation
+            ### Quick install
 
             #### Proxmox VE 8 (Debian 12 bookworm)
             ```bash
-            wget https://github.com/yohaya/corosync/releases/download/${{ steps.tag.outputs.tag }}/corosync_*bookworm*.deb
-            wget https://github.com/yohaya/corosync/releases/download/${{ steps.tag.outputs.tag }}/libcorosync-common4_*bookworm*.deb
-            wget https://github.com/yohaya/corosync/releases/download/${{ steps.tag.outputs.tag }}/corosync-qdevice_*bookworm*.deb
+            TAG=${{ steps.meta.outputs.tag }}
+            BASE=https://github.com/${{ github.repository }}/releases/download/${TAG}
+
+            wget "${BASE}/corosync_$(dpkg --print-architecture).bookworm.deb" 2>/dev/null || \
+              wget "${BASE}/$(curl -s https://api.github.com/repos/${{ github.repository }}/releases/tags/${TAG} \
+                | grep -o '"name": "[^"]*bookworm[^"]*corosync_[^"]*"' | head -1 | cut -d'"' -f4)"
+
+            # Simpler: just download all bookworm debs
+            curl -s https://api.github.com/repos/${{ github.repository }}/releases/tags/${TAG} \
+              | grep browser_download_url | grep bookworm | cut -d'"' -f4 | xargs wget
 
             systemctl stop corosync corosync-qdevice 2>/dev/null; true
-            dpkg -i libcorosync-common4_*bookworm*.deb corosync_*bookworm*.deb corosync-qdevice_*bookworm*.deb
-            apt-get install -f   # fix any dependency issues
+            dpkg -i libcorosync-common4_*.bookworm.deb corosync_*.bookworm.deb corosync-qdevice_*.bookworm.deb
+            apt-get install -f
             systemctl start corosync
             ```
 
             #### Proxmox VE 9 (Debian 13 trixie)
             ```bash
-            # Same steps but use *trixie*.deb files
+            # Same as above but replace "bookworm" with "trixie"
             ```
 
             ---
 
-            ### What's fixed
+            ### Fixes included
 
             | Severity | Bug | File | Impact |
             |----------|-----|------|--------|
-            | **CRITICAL** | 13 `assert()` crash points → graceful degradation | `exec/totemsrp.c` | Daemon restart storm on CPG failure |
-            | **CRITICAL** | `retrans_message_queue` TODO LEAK | `exec/totemsrp.c` | ~1 GB per ring-recovery event |
-            | **CRITICAL** | `assembly_list_free` unbounded growth | `exec/totempg.c` | **15+ GiB RSS** on 53-node cluster |
-            | HIGH | `alloca()` → `malloc()` (3 sites) | `exec/cpg.c` | Stack overflow with 100+ members |
-            | MEDIUM | sscanf buffer widths (10 files) | multiple | Format string buffer overflows |
-            | LOW | Dead write before if/else | `exec/totemudp.c` | Static analysis noise |
-            | LOW | `unsigned int` sign-extension | `exec/logsys.c` | Silent subsystem lookup failure |
-            | INFO | 6 DIAG runtime probes | `exec/totemsrp.c` | Token timing, ARU stall, queue pressure |
-
-            ---
-
-            ### DIAG log output (sample)
-            ```
-            DIAG ring recovery start: reason=4(CONSENSUS_TIMEOUT_EXPIRED) members=53 ...
-            DIAG ARU stall: node 192.168.1.5 holding group ARU at 0x0012ab34 for 25 consecutive passes
-            DIAG write throttled: FCC limit hit (10 consecutive passes), 847 msgs queued, rtr_gap=8192/16384 (50.0%)
-            DIAG ring recovery complete in 4231 ms (peak_retrans_hwm=2847)
-            ```
-            A `peak_retrans_hwm` above **12000** (73% of the 16384 limit) means you were near the crash boundary this build eliminates.
-
-  # -----------------------------------------------------------------------
-  # Dev artifact notification on every branch push (non-tag)
-  # -----------------------------------------------------------------------
-  notify-artifacts:
-    name: Post artifact links
-    needs: build
-    runs-on: ubuntu-latest
-    if: github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/')
-
-    steps:
-      - name: Summary
-        shell: bash
-        run: |
-          cat >> "$GITHUB_STEP_SUMMARY" <<'EOF'
-          ## Build complete — development artifacts
-
-          | Distribution | Artifact |
-          |---|---|
-          | Proxmox 8 / Debian 12 | `packages-pve8` |
-          | Proxmox 9 / Debian 13 | `packages-pve9` |
-
-          Download from the **Actions → Artifacts** section of this run.
-          To create an official release, push a tag: `git tag v3.1.10-pve1 && git push origin v3.1.10-pve1`
-          EOF
+            | **CRITICAL** | FCC flow-control unsigned underflow | `totemsrp.c` | Burst past window_size → queue saturation |
+            | **CRITICAL** | 13 `assert()` crash points → graceful log | `totemsrp.c` | Daemon restart storm on CPG failure |
+            | **CRITICAL** | `retrans_message_queue` drain leak | `totemsrp.c` | ~1 GB leaked per ring-recovery event |
+            | **CRITICAL** | `assembly_list_free` unbounded growth | `totempg.c` | **15+ GiB RSS** on 53-node cluster |
+            | **CRITICAL** | `token_convert` buffer too small for 256 RTR entries | `totemsrp.c` | Stack overflow on endian conversion |
+            | HIGH | `check_memb_commit_token_sanity` wrong return on short msg | `totemsrp.c` | Truncated commit token processed as valid |
+            | HIGH | `qdevice` NULL dereference (3 sites) | `votequorum.c` | Crash during qdevice init/reinit |
+            | HIGH | `RETRANSMIT_ENTRIES_MAX=30` → RTR starvation at N>30 | `totemsrp.c` | O(N/30) delivery latency growth |
+            | HIGH | `WINDOW_SIZE=50` → FCC deadlock at 300 nodes | `totemconfig.c` | Ring effectively dead at scale |
+            | HIGH | `alloca()` → `malloc()` (3 sites) | `cpg.c` | Stack overflow with 100+ members |
+            | MEDIUM | Dynamic RTR sizing: `retransmit_entries_max` per ring | `totemsrp.c` | 1 RTR slot per member, not hardcoded |
+            | MEDIUM | DIAG scalability warning when `window_size` too small | `totemsrp.c` | Operators notified before FCC throttle |
+            | MEDIUM | `logsys_config_mode_get` unsigned→int return | `logsys.c` | Silent error bypass in log config |
+            | LOW | Dead write before if/else | `totemudp.c` | Static analysis noise |
+            | INFO | 6 DIAG runtime probes | `totemsrp.c` | Token timing, ARU stall, queue pressure |
