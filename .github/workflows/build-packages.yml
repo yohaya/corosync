@@ -109,6 +109,9 @@ jobs:
             xsltproc \
             lsb-release
           dpkg -l libqb-dev "${KNET_DEV}" | tail -3
+          # Allow git to work in the workspace dir regardless of file ownership
+          # (the runner user and container user may have different UIDs)
+          git config --global --add safe.directory '*'
 
       - name: Checkout source
         uses: actions/checkout@v4
