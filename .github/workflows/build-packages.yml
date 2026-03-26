@@ -55,7 +55,20 @@ jobs:
       - name: Install build dependencies
         run: |
           set -e
+          DISTRO="${{ matrix.debian_release }}"
+
+          # Bootstrap: need wget/ca-certificates to fetch the Proxmox repo
           apt-get update -qq
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            wget ca-certificates gnupg
+
+          # Add Proxmox PVE repository — provides libknet1-dev, libqb-dev, etc.
+          # that are not in standard Debian repos.
+          # Using [trusted=yes] for CI (no enterprise subscription needed).
+          echo "deb [trusted=yes] http://download.proxmox.com/debian/pve ${DISTRO} pve-no-subscription" \
+            > /etc/apt/sources.list.d/pve.list
+          apt-get update -qq
+
           DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
             git \
             build-essential \
@@ -73,7 +86,6 @@ jobs:
             docbook2x \
             libxml2-utils \
             xsltproc \
-            ca-certificates \
             lsb-release
           dpkg -l libqb-dev libknet1-dev | tail -3
 
