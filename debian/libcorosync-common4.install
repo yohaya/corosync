@@ -1,1 +1,7 @@
 usr/lib/*/libcorosync_common.so.4*
+usr/lib/*/libcfg.so.7*
+usr/lib/*/libcmap.so.4*
+usr/lib/*/libcpg.so.4*
+usr/lib/*/libquorum.so.5*
+usr/lib/*/libsam.so.4*
+usr/lib/*/libvotequorum.so.8*

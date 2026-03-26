@@ -1,3 +1,10 @@
 usr/include/corosync/
 usr/lib/*/libcorosync_common.so
-usr/lib/*/pkgconfig/corosync.pc
+usr/lib/*/libcfg.so
+usr/lib/*/libcmap.so
+usr/lib/*/libcpg.so
+usr/lib/*/libquorum.so
+usr/lib/*/libsam.so
+usr/lib/*/libvotequorum.so
+usr/lib/*/pkgconfig/
+usr/share/man/man3/
