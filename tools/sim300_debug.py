@@ -507,7 +507,11 @@ class Ring:
         # ---- BUG-18: dynamic RTR cap cliff (cluster shrinks) ----
         global _rtr_cap_cliff_events, _prev_rtr_cap
         active = sum(1 for n in self.nodes if not n.is_partitioned and not n.is_nic_flap)
-        new_cap = max(64, min(active, RETRANSMIT_ENTRIES_MAX))
+        # pve8 formula: max(max(active×5, 384), 64, RETRANSMIT_ENTRIES_MAX)
+        rtr_max_pve8 = max(active * 5, 384)
+        if rtr_max_pve8 > RETRANSMIT_ENTRIES_MAX:
+            rtr_max_pve8 = RETRANSMIT_ENTRIES_MAX
+        new_cap = max(64, rtr_max_pve8)
         if _prev_rtr_cap > 0 and new_cap < _prev_rtr_cap * 0.5:
             _rtr_cap_cliff_events += 1
             probe(sim_time, "rtr_cap_cliff", trigger_node,
