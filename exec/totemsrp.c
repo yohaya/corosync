@@ -2189,7 +2189,7 @@ static void memb_state_operational_enter (struct totemsrp_instance *instance)
 				if (sptr2 == 0) {
 					sptr2 += snprintf(failed_node_msg, sizeof(failed_node_msg)-sptr2, " failed:");
 				}
-				sptr2 += snprintf(failed_node_msg+sptr2, sizeof(left_node_msg)-sptr2, " " CS_PRI_NODE_ID, left_list[i]);
+				sptr2 += snprintf(failed_node_msg+sptr2, sizeof(failed_node_msg)-sptr2, " " CS_PRI_NODE_ID, left_list[i]);
 			}
 		}
 		if (sptr2 == 0) {
@@ -3113,8 +3113,13 @@ static int orf_token_rtr (
 	unsigned int range = 0;
 	int rtr_before_add;
 	int rtr_per_node_cap;
-	char retransmit_msg[1024];
-	char value[64];
+	/* BUG-22 (pve9): removed retransmit_msg[1024] + loop that filled it.
+	 * With RETRANSMIT_ENTRIES_MAX=2048 (pve8) each entry is up to 9 chars
+	 * ("xxxxxxxx "), so the old 1024-byte buffer overflowed on any token
+	 * with more than ~112 RTR entries — a stack smash on every rotation
+	 * under normal 300-node load.  The notice-level full-list dump was
+	 * also O(N) work per rotation producing 18+ KB log lines.
+	 * Replaced with a single debug-level count; DIAG probes give details. */
 
 	if (instance->memb_state == MEMB_STATE_RECOVERY) {
 		sort_queue = &instance->recovery_sort_queue;
@@ -3124,17 +3129,10 @@ static int orf_token_rtr (
 
 	rtr_list = &orf_token->rtr_list[0];
 
-	strcpy (retransmit_msg, "Retransmit List: ");
 	if (orf_token->rtr_list_entries) {
 		log_printf (instance->totemsrp_log_level_debug,
-			"Retransmit List %d", orf_token->rtr_list_entries);
-		for (i = 0; i < orf_token->rtr_list_entries; i++) {
-			sprintf (value, "%x ", rtr_list[i].seq);
-			strcat (retransmit_msg, value);
-		}
-		strcat (retransmit_msg, "");
-		log_printf (instance->totemsrp_log_level_notice,
-			"%s", retransmit_msg);
+			"orf_token_rtr: %d RTR entries to process",
+			orf_token->rtr_list_entries);
 	}
 
 	/*
