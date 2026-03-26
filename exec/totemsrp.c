@@ -3405,7 +3405,7 @@ static void memb_state_commit_token_update (
 			"(membership shrank mid-commit) — re-gathering",
 			instance->commit_token->memb_index,
 			instance->commit_token->addr_entries);
-		memb_state_gather_enter (instance, TOTEMSRP_FAILED_TO_RECV);
+		memb_state_gather_enter (instance, TOTEMSRP_GSFROM_FAILED_TO_RECEIVE);
 		return;
 	}
 
