@@ -103,6 +103,7 @@ jobs:
             libqb-dev \
             "${KNET_DEV}" \
             zlib1g-dev \
+            libsystemd-dev \
             groff \
             docbook2x \
             libxml2-utils \
