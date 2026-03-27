@@ -4298,14 +4298,23 @@ static int check_orf_token_sanity(
 		rtr_entries = token->rtr_list_entries;
 	}
 
-	if (rtr_entries > RETRANSMIT_ENTRIES_MAX) {
+	/* BUG-27 (pve12): signed-int check missed negative values.
+	 * A crafted token with rtr_list_entries=0xFFFFFFFF stores -1 as int.
+	 * -1 > RETRANSMIT_ENTRIES_MAX (2048) is FALSE → check passed.
+	 * Then required_len = sizeof(orf_token) + (-1)*sizeof(rtr_item) wraps
+	 * as size_t to a small number (~24), passing the msg_len check.
+	 * Subsequently sizeof(rtr_item)*token->rtr_list_entries at L4618 computes
+	 * as SIZE_MAX → stack-smashing memcpy into token_storage.
+	 * Fix: explicitly reject negative values before the unsigned comparison. */
+	if (rtr_entries < 0 || rtr_entries > RETRANSMIT_ENTRIES_MAX) {
 		log_printf (instance->totemsrp_log_level_security,
-		    "Received orf_token message rtr_entries is corrupted...  ignoring.");
+		    "Received orf_token message rtr_entries=%d is corrupted...  ignoring.",
+		    rtr_entries);
 
 		return (-1);
 	}
 
-	required_len = sizeof(struct orf_token) + rtr_entries * sizeof(struct rtr_item);
+	required_len = sizeof(struct orf_token) + (unsigned int)rtr_entries * sizeof(struct rtr_item);
 	if (msg_len < required_len) {
 		log_printf (instance->totemsrp_log_level_security,
 		    "Received orf_token message is too short...  ignoring.");
@@ -5485,7 +5494,12 @@ static void orf_token_endian_convert (const struct orf_token *in, struct orf_tok
 	out->backlog = swab32 (in->backlog);
 	out->retrans_flg = swab32 (in->retrans_flg);
 	out->rtr_list_entries = swab32 (in->rtr_list_entries);
-	for (i = 0; i < out->rtr_list_entries; i++) {
+	/* BUG-28 (pve12): defense-in-depth bound on the endian-convert loop.
+	 * check_orf_token_sanity (BUG-27 fix) already rejects negative or
+	 * oversized rtr_list_entries before we reach this function, but
+	 * add RETRANSMIT_ENTRIES_MAX cap here to prevent a runaway loop if
+	 * called on an unvalidated token from any future code path. */
+	for (i = 0; i < out->rtr_list_entries && i < RETRANSMIT_ENTRIES_MAX; i++) {
 		out->rtr_list[i].ring_id.rep = swab32(in->rtr_list[i].ring_id.rep);
 		out->rtr_list[i].ring_id.seq = swab64 (in->rtr_list[i].ring_id.seq);
 		out->rtr_list[i].seq = swab32 (in->rtr_list[i].seq);

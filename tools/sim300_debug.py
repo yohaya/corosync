@@ -22,6 +22,8 @@ Bugs tracked in this variant (on top of BUG-1..BUG-5 from sim300.py):
           rates, fairness cap still leaves some laggards unserviced for long runs.
   BUG-17: DELIVERY ORDERING VIOLATION — if sq_item_add silently drops a seqno
           (slot already in-use), the node delivers a gap, breaking TOTEM guarantees.
+          Fixed pve12 (simulator): FCC guard `group_aru != SEQNO_INITIAL` skipped
+          throttling when laggard received 0 msgs; RTR guard skipped retransmits too.
   BUG-18: DYNAMIC RTR CAP CLIFF — when cluster shrinks below 64 nodes, cap drops
           to 64 and per-node budget halves; recovery storms may overwhelm the budget.
   BUG-19: FCC WINDOW UNDERSIZE — if window_size < max_messages × active_nodes,
@@ -30,6 +32,12 @@ Bugs tracked in this variant (on top of BUG-1..BUG-5 from sim300.py):
           only 2 nodes served/rotation with 300 members. New: max(4, 2×max/members).
   BUG-21: WINDOW_SIZE BURST HEADROOM — window_size=ideal (max_messages×members×1.0)
           causes 66% FCC throttling under write floods. Need 1.5× safety margin.
+  BUG-27: RTR_LIST_ENTRIES NEGATIVE BYPASS — check_orf_token_sanity compared rtr_entries
+          as signed int, so -1 (0xFFFFFFFF) passed the > RETRANSMIT_ENTRIES_MAX check.
+          required_len wrapped as size_t → SIZE_MAX → stack-smash memcpy. Fixed pve12.
+  BUG-28: ENDIAN CONVERT LOOP UNBOUNDED — orf_token_endian_convert loop had no
+          RETRANSMIT_ENTRIES_MAX bound; runaway loop if called on unvalidated token.
+          Fixed pve12 (defense-in-depth; BUG-27 fix already rejects bad entries).
 
 Usage:
     python3 sim300_debug.py                        # default 300 nodes, 180s
@@ -560,8 +568,12 @@ class Ring:
     # ---- assert-site checks ----
 
     def _check_rtr_range(self, node: Node, sim_time: float) -> List[int]:
-        if self.token.seq == SEQNO_INITIAL or node.my_aru == SEQNO_INITIAL:
+        if self.token.seq == SEQNO_INITIAL:
             return []
+        # BUG-17 FIX (pve12): removed `or node.my_aru == SEQNO_INITIAL` early-return.
+        # When a multi-slow node has received 0 messages (my_aru == SEQNO_INITIAL),
+        # we must still generate RTR requests from seqno 0 onward; the old guard
+        # skipped RTR entirely for such nodes, compounding the FCC false-positive.
         range_val = sq_diff(self.token.seq, node.my_aru)
         if range_val == 0:
             return []
@@ -638,7 +650,13 @@ class Ring:
     def _fcc_transmits_allowed(self) -> int:
         global _throttle_events, _fcc_throttle_state, _fcc_window_undersize_events
         allowed = MAX_MESSAGES
-        if self.token.seq != SEQNO_INITIAL and self.group_aru != SEQNO_INITIAL:
+        if self.token.seq != SEQNO_INITIAL:
+            # BUG-17 FIX (pve12): old guard was `group_aru != SEQNO_INITIAL`, which
+            # skipped FCC entirely when a multi-slow laggard had received 0 messages
+            # (group_aru stuck at SEQNO_INITIAL=0xFFFFFFFF). The skip caused FCC to
+            # never fire, letting messages pile up beyond window_size and triggering
+            # spurious ordering violations. sq_diff(token.seq, SEQNO_INITIAL) correctly
+            # equals the number of messages in flight when the laggard has aru=SEQNO_INITIAL.
             gap = sq_diff(self.token.seq, self.group_aru)
 
             # BUG-6 FIX (pve6): 20% hysteresis — once throttled, only unthrottle
@@ -814,7 +832,8 @@ class Ring:
         _fcc_last_state = is_throttled
 
         # BUG-12/13/15: sort queue overflow threshold probes
-        if self.token.seq != SEQNO_INITIAL and self.group_aru != SEQNO_INITIAL:
+        # (BUG-17 fix: also check when group_aru==SEQNO_INITIAL so overflow is detected)
+        if self.token.seq != SEQNO_INITIAL:
             aru_gap = sq_diff(self.token.seq, self.group_aru)
             pct = aru_gap / QUEUE_RTR_ITEMS_SIZE_MAX
             if pct > _sq_hw_peak_pct:
@@ -1433,10 +1452,10 @@ def print_results(args, nodes: List[Node], ring: Ring) -> None:
 
     # ---- FIXES NEEDED section ----
     print(f"\n{'=' * 80}")
-    print(f"  === ALL KNOWN C CODE FIXES (status as of pve11) ===")
+    print(f"  === ALL KNOWN C CODE FIXES (status as of pve12) ===")
     print(f"{'=' * 80}")
     print(f"""
-  All assert crash sites and stability bugs have been fixed in pve1–pve11.
+  All assert crash sites and stability bugs have been fixed in pve1–pve12.
   The following were the original issues and their fix status:
 
   totemsrp.c  13× assert() → graceful log+recover        FIXED pve1
@@ -1485,6 +1504,13 @@ def print_results(args, nodes: List[Node], ring: Ring) -> None:
               Guard: log WARNING + return if addr_entries==0.
   totemsrp.c  BUG-26 assert(instance!=NULL) in buffer      FIXED pve11
               alloc/release → graceful log+return NULL/void.
+  totemsrp.c  BUG-27 check_orf_token_sanity signed-int     FIXED pve12
+              rtr_entries=-1 passed > RETRANSMIT_ENTRIES_MAX check (FALSE).
+              required_len wrapped as size_t → stack-smashing memcpy.
+              Fix: reject rtr_entries < 0 before unsigned comparison.
+  totemsrp.c  BUG-28 orf_token_endian_convert loop bound   FIXED pve12
+              Defense-in-depth: add RETRANSMIT_ENTRIES_MAX cap to loop
+              so runaway impossible even from unvalidated code paths.
 
   Remaining known limitations (protocol-level, no C fix possible):
     - BUG-7: ARU amplification — 1 slow node forces N-1 retransmits/rotation
