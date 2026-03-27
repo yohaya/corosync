@@ -93,8 +93,28 @@
 #include "cs_queue.h"
 
 #define LOCALHOST_IP				inet_addr("127.0.0.1")
-#define QUEUE_RTR_ITEMS_SIZE_MAX		16384 /* allow 16384 retransmit items */
-#define RETRANS_MESSAGE_QUEUE_SIZE_MAX		16384 /* allow 500 messages to be queued */
+/* BUG-23 (pve10): sort-queue limit too small — silent data loss on >20s partitions.
+ *
+ * At 800 writes/s a 30s partition accumulates 24,000 unacked messages.  The old
+ * limit of 16,384 caused orf_token_rtr() to clamp the range and silently skip
+ * the oldest 7,616 messages; the rejoining node could never retransmit them.
+ *
+ * Safe partition window = QUEUE_RTR_ITEMS_SIZE_MAX / write_rate_per_sec:
+ *   16384 at  800/s → 20s  (too short for common partition scenarios)
+ *   32768 at  800/s → 41s  (covers most real-world partition durations)
+ *   32768 at 2000/s → 16s  (still limited; higher rates need consensus_timeout tuning)
+ *
+ * RETRANS_MESSAGE_QUEUE_SIZE_MAX must match: gather_enter() copies messages from
+ * the sort queue to the retrans queue during ring recovery.  If retrans < sort,
+ * the excess messages are dropped at recovery time with a WARNING log.
+ *
+ * Memory impact per daemon instance (both queues):
+ *   metadata: 2 × 32768 × 12B  =   786 KB  (sort queue + retrans queue headers)
+ *   sq arrays: 2 × 32768 × 8B  =   524 KB  (items_inuse + items_miss_count × 2)
+ *   peak recovery buffers: 32768 × ~66KB = ~2 GB  (transient, drained in <1s)
+ */
+#define QUEUE_RTR_ITEMS_SIZE_MAX		32768
+#define RETRANS_MESSAGE_QUEUE_SIZE_MAX		32768
 #define RECEIVED_MESSAGE_QUEUE_SIZE_MAX		500 /* allow 500 messages to be queued */
 #define MAXIOVS					5
 /*

@@ -58,7 +58,7 @@ TOKEN_TIMEOUT_MS         = 5000
 TOKEN_RETRANSMITS        = 10
 MAX_MESSAGES             = 25
 WINDOW_SIZE              = 300           # fork fix: was 50
-QUEUE_RTR_ITEMS_SIZE_MAX = 16384
+QUEUE_RTR_ITEMS_SIZE_MAX = 32768  # pve10: doubled from 16384 (BUG-23)
 RETRANSMIT_ENTRIES_MAX   = 2048         # fork fix: was 30→256→384→2048 (pve8: enlarged for scale)
 FRAME_SIZE_MAX           = 65536
 PROCESSOR_COUNT_MAX      = 384
@@ -1473,6 +1473,9 @@ def print_results(args, nodes: List[Node], ring: Ring) -> None:
   totemsrp.c  BUG-9 memb_index >= addr_entries re-gather   FIXED pve3 (also confirmed pve9)
   totemsrp.c  BUG-22 retransmit_msg[1024] stack overflow   FIXED pve9
   totemsrp.c  failed_node_msg sizeof(left_node_msg) typo   FIXED pve9
+  totemsrp.c  BUG-23 QUEUE_RTR_ITEMS_SIZE_MAX 16384→32768  FIXED pve10
+              + RETRANS_MESSAGE_QUEUE_SIZE_MAX 16384→32768
+              safe partition window: 41s @ 800/s, 16s @ 2000/s
 
   Remaining known limitations (protocol-level, no C fix possible):
     - BUG-7: ARU amplification — 1 slow node forces N-1 retransmits/rotation
