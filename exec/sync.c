@@ -273,6 +273,17 @@ static void sync_service_build_handler (unsigned int nodeid, const void *msg)
 			}
 		}
 		if (found == 0) {
+			/* BUG-39 (pve15): my_service_list has SERVICES_COUNT_MAX (64)
+			 * entries but service_list[] from the wire holds up to 128.
+			 * Without a bounds check, appending more than 64 new services
+			 * overflows the static array.  Log and skip the excess. */
+			if (my_service_list_entries >= SERVICES_COUNT_MAX) {
+				log_printf (LOGSYS_LEVEL_ERROR,
+					"sync: service_list overflow at entry %d "
+					"(SERVICES_COUNT_MAX=%d) — skipping",
+					i, SERVICES_COUNT_MAX);
+				break;
+			}
 			my_service_list[my_service_list_entries].state = PROCESS;
 			my_service_list[my_service_list_entries].service_id =
 				req_exec_service_build_message->service_list[i];

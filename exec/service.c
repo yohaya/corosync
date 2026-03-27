@@ -463,6 +463,15 @@ unsigned int corosync_service_unlink_and_exit (
 	}
 	service_unlink_and_exit_data->api = api;
 	service_unlink_and_exit_data->name = strdup (service_name);
+	/* BUG-40 (pve15): strdup() can return NULL on OOM; the job handler
+	 * passes ->name to service_unlink_and_exit() which dereferences it.
+	 * Free the struct and return an error rather than scheduling a crash. */
+	if (service_unlink_and_exit_data->name == NULL) {
+		log_printf (LOGSYS_LEVEL_ERROR,
+			"strdup failed in corosync_service_unlink_and_exit — cannot schedule service exit");
+		free (service_unlink_and_exit_data);
+		return (-1);
+	}
 	service_unlink_and_exit_data->ver = service_ver;
 
 	qb_loop_job_add(cs_poll_handle_get(),

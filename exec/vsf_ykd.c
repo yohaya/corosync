@@ -364,8 +364,11 @@ static void ykd_deliver_fn (
 		return;
 	}
 #endif
+	/* BUG-38 (pve15): require full ykd_header + ykd_state before endian-
+	 * converting; the old check only verified msg_len > sizeof(ykd_header),
+	 * which allowed ykd_state_endian_convert to read past the message. */
 	if (endian_conversion_required &&
-	    (msg_len > sizeof (struct ykd_header))) {
+	    (msg_len >= sizeof (struct ykd_header) + sizeof (struct ykd_state))) {
 		ykd_state_endian_convert ((struct ykd_state *)msg_state);
 	}
 
@@ -381,6 +384,17 @@ static void ykd_deliver_fn (
 			state_received_process[state_position].received = 1;
 			break;
 		}
+	}
+
+	/* BUG-37 (pve15): if sender's nodeid is not in state_received_process,
+	 * state_position == state_received_confchg_entries after the loop above.
+	 * Using that value as an array index into state_received_process[] is an
+	 * OOB write.  Drop the message gracefully instead. */
+	if (state_position >= state_received_confchg_entries) {
+		log_printf (LOGSYS_LEVEL_WARNING,
+			"ykd_deliver_fn: sender nodeid %u not in confchg list — ignoring",
+			nodeid);
+		return;
 	}
 
 	/*
@@ -401,7 +415,14 @@ static void ykd_deliver_fn (
 
 	switch (ykd_mode) {
 		case YKD_MODE_SENDSTATE:
-			assert (msg_len > sizeof (struct ykd_header));
+			/* BUG-38 (pve15): assert() crashes the daemon on a truncated
+			 * or malformed SENDSTATE message.  Validate msg_len gracefully. */
+			if (msg_len <= sizeof (struct ykd_header)) {
+				log_printf (LOGSYS_LEVEL_WARNING,
+					"ykd_deliver_fn: SENDSTATE msg too short (%u <= %zu), ignoring",
+					msg_len, sizeof (struct ykd_header));
+				return;
+			}
 			/*
 			 * Copy state information for the sending processor
 			 */
@@ -489,8 +510,19 @@ static void ykd_confchg_fn (
 		ykd_primary_designated,
 		&ykd_ring_id);
 
+	/* BUG-37 (pve15): clamp member_list_entries to YKD_PROCESSOR_COUNT_MAX
+	 * before populating state_received_confchg/process; without the guard
+	 * a cluster larger than YKD_PROCESSOR_COUNT_MAX overflows both arrays. */
+	if ((int)member_list_entries > YKD_PROCESSOR_COUNT_MAX) {
+		log_printf (LOGSYS_LEVEL_WARNING,
+			"ykd_confchg_fn: member_list_entries %zu exceeds "
+			"YKD_PROCESSOR_COUNT_MAX %d — clamping",
+			member_list_entries, YKD_PROCESSOR_COUNT_MAX);
+		member_list_entries = YKD_PROCESSOR_COUNT_MAX;
+	}
+
 	memset (&state_received_confchg, 0, sizeof (state_received_confchg));
-	for (i = 0; i < member_list_entries; i++) {
+	for (i = 0; i < (int)member_list_entries; i++) {
 		state_received_confchg[i].nodeid = member_list[i];
 		state_received_confchg[i].received = 0;
 	}
