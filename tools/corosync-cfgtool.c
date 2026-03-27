@@ -139,6 +139,11 @@ nodestatusget_do (enum user_action action, int brief)
 	}
 	if (!transport_str) {
 		transport_str = strdup("knet"); /* It's the default */
+		if (!transport_str) {
+			cmap_finalize(cmap_handle);
+			corosync_cfg_finalize(handle);
+			return EXIT_FAILURE;
+		}
 	}
 
 	result = corosync_cfg_local_get(handle, &local_nodeid);
@@ -172,6 +177,10 @@ nodestatusget_do (enum user_action action, int brief)
 			continue;
 		}
 		if (cmap_get_uint32(cmap_handle, iter_key, &nodeid) == CS_OK) {
+			if (s >= KNET_MAX_HOST) {
+				fprintf(stderr, "Too many nodes in nodelist (max %d) — ignoring excess\n", KNET_MAX_HOST);
+				break;
+			}
 			nodeid_list[s++] = nodeid;
 		}
 	}
@@ -217,6 +226,9 @@ nodestatusget_do (enum user_action action, int brief)
 
 			/* transport is (sensibly) indexed by link number */
 			if (sscanf(iter_key, "totem.interface.%u.knet_transport", &link_number) != 1) {
+				continue;
+			}
+			if (link_number >= KNET_MAX_LINK) {
 				continue;
 			}
 			snprintf(knet_transport_str, sizeof(knet_transport_str),

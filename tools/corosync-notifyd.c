@@ -1135,6 +1135,10 @@ static void track_link_updown_events(void)
 	while ((err = cmap_iter_next(stats_handle, iter_handle, key_name, &value_len, &type)) == CS_OK) {
 		if (strstr(key_name, ".connected")) {
 
+			if (strlen(key_name) >= sizeof(track_item->key_name)) {
+				continue;
+			}
+
 			track_item = malloc(sizeof(struct track_item));
 			if (!track_item) {
 				return;
