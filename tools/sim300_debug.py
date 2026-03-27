@@ -1494,7 +1494,8 @@ def print_results(args, nodes: List[Node], ring: Ring) -> None:
 """)
     if _memb_index_overflow_events > 0:
         print(f"  NOTE: BUG-9 (memb_index overflow) triggered {_memb_index_overflow_events}x this run — "
-              f"FIXED by re-gather guard at totemsrp.c:3475")
+              f"FIXED pve3 (re-gather guard) + BUG-24 pve11 (commit_enter aborts cleanly; "
+              f"no state machine corruption)")
 
     print("=" * 80)
 
