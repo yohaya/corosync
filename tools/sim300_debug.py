@@ -1433,10 +1433,10 @@ def print_results(args, nodes: List[Node], ring: Ring) -> None:
 
     # ---- FIXES NEEDED section ----
     print(f"\n{'=' * 80}")
-    print(f"  === ALL KNOWN C CODE FIXES (status as of pve10) ===")
+    print(f"  === ALL KNOWN C CODE FIXES (status as of pve11) ===")
     print(f"{'=' * 80}")
     print(f"""
-  All assert crash sites and stability bugs have been fixed in pve1–pve9.
+  All assert crash sites and stability bugs have been fixed in pve1–pve11.
   The following were the original issues and their fix status:
 
   totemsrp.c  13× assert() → graceful log+recover        FIXED pve1
@@ -1476,6 +1476,15 @@ def print_results(args, nodes: List[Node], ring: Ring) -> None:
   totemsrp.c  BUG-23 QUEUE_RTR_ITEMS_SIZE_MAX 16384→32768  FIXED pve10
               + RETRANS_MESSAGE_QUEUE_SIZE_MAX 16384→32768
               safe partition window: 41s @ 800/s, 16s @ 2000/s
+  totemsrp.c  BUG-24 memb_state_commit_enter state machine FIXED pve11
+              _commit_token_update void→int; early-return on re-gather.
+              Without fix: GATHER state overwritten by COMMIT, commit token
+              sent in wrong state, ring formation oscillates.
+  totemsrp.c  BUG-25 memb_state_commit_token_target_set    FIXED pve11
+              SIGFPE: addr_entries==0 → modulo-by-zero crash.
+              Guard: log WARNING + return if addr_entries==0.
+  totemsrp.c  BUG-26 assert(instance!=NULL) in buffer      FIXED pve11
+              alloc/release → graceful log+return NULL/void.
 
   Remaining known limitations (protocol-level, no C fix possible):
     - BUG-7: ARU amplification — 1 slow node forces N-1 retransmits/rotation

@@ -720,7 +720,7 @@ static void messages_free (struct totemsrp_instance *instance, unsigned int toke
 static void memb_ring_id_set (struct totemsrp_instance *instance,
 	const struct memb_ring_id *ring_id);
 static void target_set_completed (void *context);
-static void memb_state_commit_token_update (struct totemsrp_instance *instance);
+static int memb_state_commit_token_update (struct totemsrp_instance *instance);
 static void memb_state_commit_token_target_set (struct totemsrp_instance *instance);
 static int memb_state_commit_token_send (struct totemsrp_instance *instance);
 static int memb_state_commit_token_send_recovery (struct totemsrp_instance *instance, struct memb_commit_token *memb_commit_token);
@@ -1592,13 +1592,23 @@ static void my_leave_memb_set(
 
 static void *totemsrp_buffer_alloc (struct totemsrp_instance *instance)
 {
-	assert (instance != NULL);
+	/* BUG-26 (pve11): assert → graceful NULL return */
+	if (instance == NULL) {
+		log_printf (LOGSYS_LEVEL_ERROR,
+			"totemsrp_buffer_alloc: instance is NULL — cannot allocate");
+		return NULL;
+	}
 	return totemnet_buffer_alloc (instance->totemnet_context);
 }
 
 static void totemsrp_buffer_release (struct totemsrp_instance *instance, void *ptr)
 {
-	assert (instance != NULL);
+	/* BUG-26 (pve11): assert → graceful no-op */
+	if (instance == NULL) {
+		log_printf (LOGSYS_LEVEL_ERROR,
+			"totemsrp_buffer_release: instance is NULL — cannot release buffer");
+		return;
+	}
 	totemnet_buffer_release (instance->totemnet_context, ptr);
 }
 
@@ -2453,7 +2463,7 @@ static void memb_state_gather_enter (
 	 * or message loss (large retrans_message_queue).
 	 *
 	 * retrans_hwm shows the peak fill seen since daemon start or last
-	 * ring formation — a value close to QUEUE_RTR_ITEMS_SIZE_MAX (16384)
+	 * ring formation — a value close to QUEUE_RTR_ITEMS_SIZE_MAX (32768)
 	 * means the cluster was close to the assert-crash boundary.
 	 */
 	instance->diag_ring_enter_ns = qb_util_nano_current_get ();
@@ -2506,7 +2516,15 @@ static void memb_state_commit_enter (
 {
 	old_ring_state_save (instance);
 
-	memb_state_commit_token_update (instance);
+	/* BUG-24 (pve11): if memb_index overflow triggers re-gather inside _update,
+	 * the old void return caused commit_enter to continue: it called
+	 * _target_set, overwrote memb_state=COMMIT (clobbering the GATHER state
+	 * set by gather_enter), and eventually sent a commit token in the wrong
+	 * state — corrupting the ring formation state machine.  Now _update
+	 * returns -1 on re-gather; we bail here and let the gather timers fire. */
+	if (memb_state_commit_token_update (instance) != 0) {
+		return;
+	}
 
 	memb_state_commit_token_target_set (instance);
 
@@ -3476,7 +3494,10 @@ static int orf_token_send_initial (struct totemsrp_instance *instance)
 	return (res);
 }
 
-static void memb_state_commit_token_update (
+/* BUG-24 (pve11): changed return type void → int so callers can detect
+ * the re-gather-entered path and abort commit_enter early, preventing
+ * memb_state = COMMIT from clobbering the GATHER state set by gather_enter. */
+static int memb_state_commit_token_update (
 	struct totemsrp_instance *instance)
 {
 	struct srp_addr *addr;
@@ -3497,13 +3518,13 @@ static void memb_state_commit_token_update (
 			instance->commit_token->memb_index,
 			instance->commit_token->addr_entries);
 		memb_state_gather_enter (instance, TOTEMSRP_GSFROM_FAILED_TO_RECEIVE);
-		return;
+		return -1;
 	}
 
 	if (!instance->my_id.nodeid) {
 		log_printf (instance->totemsrp_log_level_warning,
 			"memb_state_commit_token_update: my_id.nodeid is 0 — skipping update");
-		return;
+		return -1;
 	}
 
 	addr = (struct srp_addr *)instance->commit_token->end_of_commit_token;
@@ -3562,12 +3583,23 @@ static void memb_state_commit_token_update (
 	instance->commit_token->header.nodeid = instance->my_id.nodeid;
 	instance->commit_token->memb_index += 1;
 	/* Bounds already checked above — memb_index is now <= addr_entries. */
+	return 0;
 }
 
 static void memb_state_commit_token_target_set (
 	struct totemsrp_instance *instance)
 {
 	struct srp_addr *addr;
+
+	/* BUG-25 (pve11): modulo-by-zero crash if addr_entries == 0.
+	 * Can happen if memb_state_commit_token_create returned early
+	 * (nodeid == 0 guard) leaving addr_entries uninitialised. */
+	if (instance->commit_token->addr_entries == 0) {
+		log_printf (instance->totemsrp_log_level_warning,
+			"memb_state_commit_token_target_set: addr_entries == 0 "
+			"— skipping (no members in commit token)");
+		return;
+	}
 
 	addr = (struct srp_addr *)instance->commit_token->end_of_commit_token;
 
@@ -4143,7 +4175,7 @@ static void fcc_rtr_limit (
 	 *
 	 * The gap (token.seq - last_released) is the key metric: it tells
 	 * operators how many in-flight messages are occupying the RTR queue.
-	 * The closer this is to QUEUE_RTR_ITEMS_SIZE_MAX (16384), the closer
+	 * The closer this is to QUEUE_RTR_ITEMS_SIZE_MAX (32768), the closer
 	 * the ring is to the drop-boundary fixed in this build.
 	 */
 	if (*transmits_allowed == 0) {
@@ -4179,7 +4211,7 @@ static void fcc_rtr_limit (
 	/*
 	 * CRITICAL: ARU gap approaching sort-queue overflow boundary.
 	 *
-	 * The sort queue holds at most QUEUE_RTR_ITEMS_SIZE_MAX (16384) in-flight
+	 * The sort queue holds at most QUEUE_RTR_ITEMS_SIZE_MAX (32768) in-flight
 	 * messages.  When the global ARU gap (token.seq - token.aru) exceeds 75%
 	 * of that limit (12288), the ring is within seconds of a hard overflow
 	 * that will cause permanent message loss and force a ring recovery.
