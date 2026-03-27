@@ -2489,7 +2489,11 @@ int totemconfig_commit_new_params(
 	struct totem_interface *new_interfaces = NULL;
 
 	new_interfaces = malloc (sizeof (struct totem_interface) * INTERFACE_MAX);
-	assert(new_interfaces != NULL);
+	if (new_interfaces == NULL) {
+		log_printf(LOGSYS_LEVEL_ERROR,
+			"totemconfig: OOM allocating interfaces for config commit — aborting");
+		return (-1);
+	}
 	memcpy(new_interfaces, totem_config->interfaces, sizeof (struct totem_interface) * INTERFACE_MAX);
 
 	/* Set link parameters including local_ip */
