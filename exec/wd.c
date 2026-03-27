@@ -279,8 +279,11 @@ static void wd_config_changed (struct cs_fsm* fsm, int32_t event, void * data)
 
 	next_timeout = ref->check_timeout;
 
+	/* BUG-62 (pve16): key_name is built as res_path+"poll_period" by snprintf
+	 * but icmap_get_uint64() was passed ref->res_path instead of key_name —
+	 * reading the wrong (parent) key. Fix: use key_name. */
 	if ((snprintf(key_name, ICMAP_KEYNAME_MAXLEN, "%s%s", ref->res_path, "poll_period") >= ICMAP_KEYNAME_MAXLEN) ||
-		(icmap_get_uint64(ref->res_path, &tmp_value) == CS_OK)) {
+		(icmap_get_uint64(key_name, &tmp_value) == CS_OK)) {
 		if (tmp_value >= WD_MIN_TIMEOUT_MS && tmp_value <= WD_MAX_TIMEOUT_MS) {
 			log_printf (LOGSYS_LEVEL_DEBUG,
 				"poll_period changing from:%"PRIu64" to %"PRIu64".",

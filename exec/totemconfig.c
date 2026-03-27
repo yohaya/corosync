@@ -1478,6 +1478,19 @@ static int put_nodelist_members_to_config(struct totem_config *totem_config, icm
 			}
 
 			member_count = totem_config->interfaces[linknumber].member_count;
+			/* BUG-59 (pve16): member_count from ICMAP is user-controlled; no bounds
+			 * check before using as index into member_list[PROCESSOR_COUNT_MAX].
+			 * Fix: reject nodelist entries that exceed the array size. */
+			if (member_count >= PROCESSOR_COUNT_MAX) {
+				sprintf(error_string_response,
+					"Too many members (>%d) for interface %u in nodelist — ignoring excess",
+					PROCESSOR_COUNT_MAX, linknumber);
+				*error_string = error_string_response;
+				free(node_addr_str);
+				icmap_iter_finalize(iter2);
+				icmap_iter_finalize(iter);
+				return -1;
+			}
 			res = totemip_parse(&totem_config->interfaces[linknumber].member_list[member_count],
 						node_addr_str, totem_config->ip_version);
 			if (res == 0) {
@@ -1784,6 +1797,16 @@ static int get_interface_params(struct totem_config *totem_config, icmap_map_t m
 			}
 
 			if (icmap_get_string_r(map, member_iter_key, &str) == CS_OK) {
+				/* BUG-59 (pve16): same bounds check for the interface members section. */
+				if (member_count >= PROCESSOR_COUNT_MAX) {
+					log_printf(LOGSYS_LEVEL_WARNING,
+						"totemconfig: member count exceeds PROCESSOR_COUNT_MAX (%d) "
+						"for interface %u — skipping remaining members",
+						PROCESSOR_COUNT_MAX, linknumber);
+					free(str);
+					icmap_iter_finalize(member_iter);
+					goto out;
+				}
 				res = totemip_parse (&totem_config->interfaces[linknumber].member_list[member_count++],
 						str, totem_config->ip_version);
 				if (res) {

@@ -160,6 +160,11 @@ static int uid_determine (const char *req_user)
 	}
 
 	pwdbuffer = malloc (pwdlinelen);
+	/* BUG-60 (pve16): malloc result not checked; getpwnam_r with NULL buffer is UB. */
+	if (pwdbuffer == NULL) {
+		sprintf(error_string_response, "coroparse: OOM allocating passwd buffer for uid_determine");
+		return (-1);
+	}
 
 	while ((rc = getpwnam_r (req_user, pwdptr, pwdbuffer, pwdlinelen, &temp_pwd_pt)) == ERANGE) {
 		char *n;
@@ -214,6 +219,11 @@ static int gid_determine (const char *req_group)
 	}
 
 	grpbuffer = malloc (grplinelen);
+	/* BUG-60 (pve16): same as uid_determine — malloc not checked before getgrnam_r. */
+	if (grpbuffer == NULL) {
+		sprintf(error_string_response, "coroparse: OOM allocating group buffer for gid_determine");
+		return (-1);
+	}
 
 	while ((rc = getgrnam_r (req_group, grpptr, grpbuffer, grplinelen, &temp_grp_pt)) == ERANGE) {
 		char *n;
@@ -936,18 +946,26 @@ static int main_config_parser_cb(const char *path,
 				add_as_string = 0;
 			}
 			if (strcmp(path, "totem.interface.bindnetaddr") == 0) {
+				char *tmp = strdup(value);
+				/* BUG-61 (pve16): strdup result must be checked before storing;
+				 * NULL stored here is later dereferenced in totemip_parse(). */
+				if (tmp == NULL) { goto oom_error; }
 				free(data->bindnetaddr);
-				data->bindnetaddr = strdup(value);
+				data->bindnetaddr = tmp;
 				add_as_string = 0;
 			}
 			if (strcmp(path, "totem.interface.mcastaddr") == 0) {
+				char *tmp = strdup(value);
+				if (tmp == NULL) { goto oom_error; }
 				free(data->mcastaddr);
-				data->mcastaddr = strdup(value);
+				data->mcastaddr = tmp;
 				add_as_string = 0;
 			}
 			if (strcmp(path, "totem.interface.broadcast") == 0) {
+				char *tmp = strdup(value);
+				if (tmp == NULL) { goto oom_error; }
 				free(data->broadcast);
-				data->broadcast = strdup(value);
+				data->broadcast = tmp;
 				add_as_string = 0;
 			}
 			if (strcmp(path, "totem.interface.mcastport") == 0) {
@@ -1007,8 +1025,10 @@ static int main_config_parser_cb(const char *path,
 				add_as_string = 0;
 			}
 			if (strcmp(path, "totem.interface.knet_transport") == 0) {
+				char *tmp = strdup(value);
+				if (tmp == NULL) { goto oom_error; }
 				free(data->knet_transport);
-				data->knet_transport = strdup(value);
+				data->knet_transport = tmp;
 				add_as_string = 0;
 			}
 			break;
@@ -1620,6 +1640,11 @@ static int main_config_parser_cb(const char *path,
 	}
 
 	return (1);
+
+oom_error:
+	/* BUG-61 (pve16): strdup() returned NULL; set error and abort parse. */
+	*error_string = "coroparse: out of memory duplicating configuration string";
+	return (0);
 
 safe_atoq_error:
 	/*

@@ -83,7 +83,14 @@ int totemip_equal(const struct totem_ip_address *addr1,
 	if (addr1->family == AF_INET6) {
 		addrlen = sizeof(struct in6_addr);
 	}
-	assert(addrlen);
+	/* BUG-63 (pve16): assert() crashes daemon if address family is neither
+	 * AF_INET nor AF_INET6 (e.g. corrupted struct). Fix: return not-equal. */
+	if (addrlen == 0) {
+		log_printf(LOGSYS_LEVEL_WARNING,
+			"totemip_equal: unknown address family %d — treating as not equal",
+			addr1->family);
+		return 0;
+	}
 
 	if (memcmp(addr1->addr, addr2->addr, addrlen) == 0)
 		return 1;
