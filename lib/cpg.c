@@ -978,7 +978,10 @@ cs_error_t cpg_zcb_alloc (
 	}
 
 	map_size = size + sizeof (struct req_lib_cpg_mcast) + sizeof (struct coroipcs_zc_header);
-	assert(memory_map (path, "corosync_zerocopy-XXXXXX", &buf, map_size) != -1);
+	if (memory_map (path, "corosync_zerocopy-XXXXXX", &buf, map_size) == -1) {
+		hdb_handle_put (&cpg_handle_t_db, handle);
+		return (CS_ERR_NO_MEMORY);
+	}
 
 	if (strlen(path) >= CPG_ZC_PATH_LEN) {
 		unlink(path);

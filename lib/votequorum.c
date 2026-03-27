@@ -190,8 +190,9 @@ cs_error_t votequorum_getinfo (
 	info->quorum = res_lib_votequorum_getinfo.quorum;
 	info->flags = res_lib_votequorum_getinfo.flags;
 	info->qdevice_votes = res_lib_votequorum_getinfo.qdevice_votes;
-	memset(info->qdevice_name, 0, VOTEQUORUM_QDEVICE_MAX_NAME_LEN);
-	strcpy(info->qdevice_name, res_lib_votequorum_getinfo.qdevice_name);
+	memcpy(info->qdevice_name, res_lib_votequorum_getinfo.qdevice_name,
+		VOTEQUORUM_QDEVICE_MAX_NAME_LEN);
+	info->qdevice_name[VOTEQUORUM_QDEVICE_MAX_NAME_LEN - 1] = '\0';
 
 error_exit:
 	hdb_handle_put (&votequorum_handle_t_db, handle);
