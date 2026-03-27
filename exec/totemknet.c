@@ -2321,8 +2321,12 @@ static int setup_nozzle(void *knet_context)
 		instance->nozzle_ipaddr = strdup(ipaddr_str);
 		instance->nozzle_prefix = strdup(prefix_str);
 		instance->nozzle_macaddr = strdup(macaddr_str);
+		/* BUG-29 (pve13): nozzle_macaddr strdup result was not checked for NULL.
+		 * All 4 strdup() calls must be validated — a failed allocation for
+		 * nozzle_macaddr would leave a NULL pointer that free_nozzle() and
+		 * subsequent nozzle configuration reads would dereference. */
 		if (!instance->nozzle_name || !instance->nozzle_ipaddr ||
-		    !instance->nozzle_prefix) {
+		    !instance->nozzle_prefix || !instance->nozzle_macaddr) {
 			knet_log_printf (LOGSYS_LEVEL_ERROR, "strdup failed in nozzle allocation");
 			/*
 			 * This 'free' will cause a complete reconfigure of the device next time we reload

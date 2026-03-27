@@ -617,7 +617,9 @@ static void totempg_deliver_fn (
 	int i;
 	struct assembly *assembly;
 	char header[FRAME_SIZE_MAX];
-	int msg_count;
+	unsigned int msg_count;  /* BUG-30 (pve13): was 'int' — mcast->msg_count is
+	                          * unsigned short on the wire; signed multiplication in
+	                          * datasize calculation matches the BUG-27 pattern. */
 	int continuation;
 	int start;
 	const char *data;
