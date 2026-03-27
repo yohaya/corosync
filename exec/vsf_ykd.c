@@ -311,7 +311,18 @@ static void ykd_session_endian_convert (struct ykd_session *ykd_session)
 	ykd_session->member_list_entries =
 		swab32 (ykd_session->member_list_entries);
 	ykd_session->session_id = swab32 (ykd_session->session_id);
-	for (i = 0; i < ykd_session->member_list_entries; i++) {
+	/* BUG-43 (pve15): member_list_entries comes from the wire; without a
+	 * bounds check, a crafted message sets it > YKD_PROCESSOR_COUNT_MAX
+	 * causing OOB writes to member_list[] when swab32() stores each element.
+	 * Clamp before iterating. */
+	if (ykd_session->member_list_entries > YKD_PROCESSOR_COUNT_MAX) {
+		log_printf (LOGSYS_LEVEL_WARNING,
+			"ykd_session_endian_convert: member_list_entries %u > "
+			"YKD_PROCESSOR_COUNT_MAX %d — clamping",
+			ykd_session->member_list_entries, YKD_PROCESSOR_COUNT_MAX);
+		ykd_session->member_list_entries = YKD_PROCESSOR_COUNT_MAX;
+	}
+	for (i = 0; i < (int)ykd_session->member_list_entries; i++) {
 		ykd_session->member_list[i] =
 			swab32 (ykd_session->member_list[i]);
 	}
@@ -326,11 +337,28 @@ static void ykd_state_endian_convert (struct ykd_state *state)
 	state->ambiguous_sessions_entries = swab32 (state->ambiguous_sessions_entries);
 	state->session_id = swab32 (state->session_id);
 
-	for (i = 0; i < state->last_formed_entries; i++) {
+	/* BUG-43 (pve15): both counts come from the wire; without bounds checks
+	 * a crafted message sets them > YKD_PROCESSOR_COUNT_MAX causing OOB
+	 * accesses into last_formed[] / ambiguous_sessions[] arrays. */
+	if (state->last_formed_entries > YKD_PROCESSOR_COUNT_MAX) {
+		log_printf (LOGSYS_LEVEL_WARNING,
+			"ykd_state_endian_convert: last_formed_entries %u > "
+			"YKD_PROCESSOR_COUNT_MAX %d — clamping",
+			state->last_formed_entries, YKD_PROCESSOR_COUNT_MAX);
+		state->last_formed_entries = YKD_PROCESSOR_COUNT_MAX;
+	}
+	if (state->ambiguous_sessions_entries > YKD_PROCESSOR_COUNT_MAX) {
+		log_printf (LOGSYS_LEVEL_WARNING,
+			"ykd_state_endian_convert: ambiguous_sessions_entries %u > "
+			"YKD_PROCESSOR_COUNT_MAX %d — clamping",
+			state->ambiguous_sessions_entries, YKD_PROCESSOR_COUNT_MAX);
+		state->ambiguous_sessions_entries = YKD_PROCESSOR_COUNT_MAX;
+	}
+	for (i = 0; i < (int)state->last_formed_entries; i++) {
 		ykd_session_endian_convert (&state->last_formed[i]);
 	}
 
-	for (i = 0; i < state->ambiguous_sessions_entries; i++) {
+	for (i = 0; i < (int)state->ambiguous_sessions_entries; i++) {
 		ykd_session_endian_convert (&state->ambiguous_sessions[i]);
 	}
 }
