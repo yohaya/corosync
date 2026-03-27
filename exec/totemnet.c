@@ -367,16 +367,22 @@ error_destroy:
 void *totemnet_buffer_alloc (void *net_context)
 {
 	struct totemnet_instance *instance = net_context;
-	assert (instance != NULL);
-	assert (instance->transport != NULL);
+	/* BUG-42 (pve15): assert() crashes the daemon if net_context is NULL
+	 * (e.g. transport not yet initialised on a code-path regression).
+	 * Return NULL gracefully so callers can detect the error. */
+	if (instance == NULL || instance->transport == NULL) {
+		return (NULL);
+	}
 	return instance->transport->buffer_alloc();
 }
 
 void totemnet_buffer_release (void *net_context, void *ptr)
 {
 	struct totemnet_instance *instance = net_context;
-	assert (instance != NULL);
-	assert (instance->transport != NULL);
+	/* BUG-42 (pve15): same guard as totemnet_buffer_alloc above. */
+	if (instance == NULL || instance->transport == NULL) {
+		return;
+	}
 	instance->transport->buffer_release (ptr);
 }
 

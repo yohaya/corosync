@@ -409,15 +409,39 @@ static void _logsys_subsys_filename_add (int32_t s, const char *filename)
 	if (filename == NULL) {
 		return;
 	}
-	assert(logsys_loggers[s].file_idx < MAX_FILES_PER_SUBSYS);
-	assert(logsys_loggers[s].file_idx >= 0);
+	/* BUG-41 (pve15): assert() crashes the daemon if more than
+	 * MAX_FILES_PER_SUBSYS log targets are configured.  Replace with a
+	 * graceful early-return so misconfiguration cannot terminate corosync. */
+	if (logsys_loggers[s].file_idx >= MAX_FILES_PER_SUBSYS) {
+		fprintf (stderr,
+			"logsys: subsys %d already has MAX_FILES_PER_SUBSYS=%d "
+			"log files — skipping '%s'\n",
+			s, MAX_FILES_PER_SUBSYS, filename);
+		return;
+	}
+	if (logsys_loggers[s].file_idx < 0) {
+		return;
+	}
 
 	for (i = 0; i < logsys_loggers[s].file_idx; i++) {
+		if (logsys_loggers[s].files[i] == NULL) {
+			continue;
+		}
 		if (strcmp(logsys_loggers[s].files[i], filename) == 0) {
 			return;
 		}
 	}
-	logsys_loggers[s].files[logsys_loggers[s].file_idx++] = strdup(filename);
+	logsys_loggers[s].files[logsys_loggers[s].file_idx] = strdup(filename);
+	/* BUG-41 (pve15): strdup() result not checked; NULL stored in files[]
+	 * is later passed to strcmp and _logsys_config_apply_per_file, both of
+	 * which dereference it.  Abort the add on allocation failure. */
+	if (logsys_loggers[s].files[logsys_loggers[s].file_idx] == NULL) {
+		fprintf (stderr,
+			"logsys: strdup failed adding log file '%s' for subsys %d\n",
+			filename, s);
+		return;
+	}
+	logsys_loggers[s].file_idx++;
 
 	if (logsys_system_needs_init == LOGSYS_LOGGER_INIT_DONE) {
 		_logsys_config_apply_per_file(s, filename);
