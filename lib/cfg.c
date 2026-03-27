@@ -314,6 +314,9 @@ corosync_cfg_ring_status_get (
 		goto exit_handle_put;
 	}
 
+	if (res_lib_cfg_ringstatusget.interface_count > CFG_MAX_INTERFACES) {
+		res_lib_cfg_ringstatusget.interface_count = CFG_MAX_INTERFACES;
+	}
 	*interface_count = res_lib_cfg_ringstatusget.interface_count;
 	*interface_names = malloc (sizeof (char *) * *interface_count);
 	if (*interface_names == NULL) {

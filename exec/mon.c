@@ -447,7 +447,7 @@ static void mon_instance_init (struct resource_instance* inst)
 	uint64_t tmp_value;
 	char key_name[ICMAP_KEYNAME_MAXLEN];
 	icmap_track_t icmap_track = NULL;
-	char *tmp_str;
+	char *tmp_str = NULL;
 
 	snprintf(key_name, ICMAP_KEYNAME_MAXLEN, "%s%s", inst->icmap_path, "current");
 	if (inst->max_type == ICMAP_VALUETYPE_INT32) {
@@ -473,6 +473,7 @@ static void mon_instance_init (struct resource_instance* inst)
 	snprintf(key_name, ICMAP_KEYNAME_MAXLEN, "%s%s", inst->icmap_path, "poll_period");
 	if (icmap_get_string(key_name, &tmp_str) != CS_OK ||
 	    sscanf(tmp_str, "%"PRIu64, &tmp_value) != 1) {
+		free(tmp_str);
 		icmap_set_uint64(key_name, inst->period);
 	}
 	else {

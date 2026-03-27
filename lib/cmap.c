@@ -309,6 +309,10 @@ cs_error_t cmap_dispatch (
 			old_val.type = res_lib_cmap_notify_callback->old_value_type;
 			new_val.len = res_lib_cmap_notify_callback->new_value_len;
 			old_val.len = res_lib_cmap_notify_callback->old_value_len;
+			if (new_val.len + old_val.len >
+			    (size_t)dispatch_data->size - sizeof(struct res_lib_cmap_notify_callback)) {
+				break;
+			}
 			new_val.data = res_lib_cmap_notify_callback->new_value;
 			old_val.data = (((const char *)res_lib_cmap_notify_callback->new_value) + new_val.len);
 
