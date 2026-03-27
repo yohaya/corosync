@@ -511,6 +511,11 @@ cs_error_t votequorum_dispatch (
 			}
 			res_lib_votequorum_quorum_notification = (struct res_lib_votequorum_quorum_notification *)dispatch_data;
 
+			if ((size_t)res_lib_votequorum_quorum_notification->node_list_entries * sizeof(struct votequorum_node) >
+			    (size_t)dispatch_data->size - sizeof(struct res_lib_votequorum_quorum_notification)) {
+				break;
+			}
+
 			callbacks.votequorum_quorum_notify_fn ( handle,
 								res_lib_votequorum_quorum_notification->context,
 								res_lib_votequorum_quorum_notification->quorate,
@@ -524,6 +529,11 @@ cs_error_t votequorum_dispatch (
 			}
 			res_lib_votequorum_nodelist_notification = (struct res_lib_votequorum_nodelist_notification *)dispatch_data;
 			marshall_from_mar_votequorum_ring_id (&ring_id, &res_lib_votequorum_nodelist_notification->ring_id);
+
+			if ((size_t)res_lib_votequorum_nodelist_notification->node_list_entries * sizeof(mar_uint32_t) >
+			    (size_t)dispatch_data->size - sizeof(struct res_lib_votequorum_nodelist_notification)) {
+				break;
+			}
 
 			callbacks.votequorum_nodelist_notify_fn ( handle,
 								  res_lib_votequorum_nodelist_notification->context,

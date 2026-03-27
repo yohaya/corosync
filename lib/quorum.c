@@ -502,6 +502,11 @@ cs_error_t quorum_dispatch (
 				}
 				res_lib_quorum_notification = (struct res_lib_quorum_notification *)dispatch_data;
 
+				if ((size_t)res_lib_quorum_notification->view_list_entries * sizeof(mar_uint32_t) >
+				    (size_t)dispatch_data->size - sizeof(struct res_lib_quorum_notification)) {
+					break;
+				}
+
 				quorum_inst_copy.model_v0_data.quorum_notify_fn ( handle,
 					res_lib_quorum_notification->quorate,
 					res_lib_quorum_notification->ring_seq,
@@ -528,6 +533,11 @@ cs_error_t quorum_dispatch (
 
 				ring_id.nodeid = res_lib_quorum_v1_quorum_notification->ring_id.nodeid;
 				ring_id.seq = res_lib_quorum_v1_quorum_notification->ring_id.seq;
+
+				if ((size_t)res_lib_quorum_v1_quorum_notification->view_list_entries * sizeof(mar_uint32_t) >
+				    (size_t)dispatch_data->size - sizeof(struct res_lib_quorum_v1_quorum_notification)) {
+					break;
+				}
 
 				quorum_inst_copy.model_v1_data.quorum_notify_fn ( handle,
 					res_lib_quorum_v1_quorum_notification->quorate,
