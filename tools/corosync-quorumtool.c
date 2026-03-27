@@ -492,7 +492,10 @@ static void display_nodes_data(nodeid_format_t nodeid_format, name_format_t name
 	 * Get node names
 	 */
 	for (i=0; i < g_view_list_entries; i++) {
-	        g_view_list[i].name = strdup(node_name(g_view_list[i].node_id, name_format));
+		g_view_list[i].name = strdup(node_name(g_view_list[i].node_id, name_format));
+		if (g_view_list[i].name == NULL) {
+			g_view_list[i].name = strdup("(unknown)");
+		}
 	}
 
 	printf("\nMembership information\n");

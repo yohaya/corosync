@@ -197,7 +197,11 @@ const char *get_state_dir(void)
 			res = snprintf(path, PATH_MAX, "%s/%s", LOCALSTATEDIR, "lib/corosync");
 		}
 
-		assert(res < PATH_MAX);
+		if (res >= PATH_MAX) {
+			log_printf(LOGSYS_LEVEL_WARNING,
+			    "get_state_dir: configured path truncated to %d bytes — using truncated value",
+			    PATH_MAX - 1);
+		}
 	}
 
 	return (path);
