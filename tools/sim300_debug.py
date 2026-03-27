@@ -901,6 +901,22 @@ class Ring:
                         # Verify all intermediate seqnos are in rx_set
                         for j in range(1, gap_size + 1):
                             check_seq = sq_add(prev, j)
+                            # BUG-31 SIM FIX (pve14): skip seqnos already released
+                            # and pruned from rx_set.  _check_release_range() calls
+                            # prune_rx_set(last_released) at Step 2, which removes
+                            # seqnos strictly before last_released.  If the BUG-17
+                            # check window spans the release boundary
+                            # (prev < last_released <= my_delivered), seqnos in
+                            # [prev+1..last_released-1] are absent from rx_set by
+                            # design — group_aru advanced past them, meaning ALL
+                            # nodes received them, so no ordering violation occurred.
+                            # Without this guard, the check fires a false positive
+                            # whenever group_aru catches up in a rotation where
+                            # prev_delivered lags behind (e.g. slow-node catch-up).
+                            if n.last_released != SEQNO_INITIAL and \
+                                    not (sq_lt(n.last_released, check_seq) or
+                                         check_seq == n.last_released):
+                                continue  # pruned — already released, not a violation
                             if check_seq not in n.rx_set:
                                 _delivery_order_violations += 1
                                 probe(sim_time, "delivery_order_violation", n.node_id,
@@ -1482,10 +1498,10 @@ def print_results(args, nodes: List[Node], ring: Ring) -> None:
 
     # ---- FIXES NEEDED section ----
     print(f"\n{'=' * 80}")
-    print(f"  === ALL KNOWN C CODE FIXES (status as of pve13) ===")
+    print(f"  === ALL KNOWN C CODE FIXES (status as of pve14) ===")
     print(f"{'=' * 80}")
     print(f"""
-  All assert crash sites and stability bugs have been fixed in pve1–pve13.
+  All assert crash sites and stability bugs have been fixed in pve1–pve14.
   The following were the original issues and their fix status:
 
   totemsrp.c  13× assert() → graceful log+recover        FIXED pve1
@@ -1551,8 +1567,8 @@ def print_results(args, nodes: List[Node], ring: Ring) -> None:
               as int (signed) causing signed multiplication in datasize.
               Same BUG-27 pattern; mitigated by downstream length check
               but type-incorrect.  Fix: unsigned int msg_count.
-  sim         BUG-31 ordering check false positives          FIXED pve13
-              Two paths created spurious delivery_order_violation probes:
+  sim         BUG-31 ordering check false positives          FIXED pve13+pve14
+              Four paths created spurious delivery_order_violation probes:
               (a) rejoin(): fills rx_set from rtx_buf (incomplete for long
               partitions), then flush_inbox() advances my_delivered to
               group_aru; BUG-17 finds holes in rx_set on next increment.
@@ -1561,6 +1577,33 @@ def print_results(args, nodes: List[Node], ring: Ring) -> None:
               a fresh seqno space, but _prev_delivered retained old values;
               BUG-17 computed gaps against stale pre-recovery baselines.
               Fix: _prev_delivered.clear() in _new_ring().
+              (c) slow nodes: intentional packet drops create rx_set holes;
+              BUG-17 found gaps that were expected under the slow-node model.
+              Fix: skip is_slow nodes in BUG-17 check loop.
+              (d) group_aru catch-up: when group_aru advances in Step 2,
+              prune_rx_set removes seqnos <= last_released from rx_set;
+              BUG-17 checking seqnos in [prev_delivered..last_released-1]
+              falsely fired because those seqnos were pruned-after-delivery.
+              Fix: skip check_seq where check_seq <= last_released.
+  cmap.c      BUG-32 cmap_mcast_item_find OOB read             FIXED pve14
+              no_items and value_len come from wire; without a boundary
+              check on header.size, crafted messages advance pointer p
+              past the message buffer — out-of-bounds read.
+              Fix: msg_end sentinel + break on overrun in both
+              cmap_mcast_item_find() and exec_cmap_mcast_endian_convert().
+  ipc_glue.c  BUG-33 bytes_msg int32_t overflow                FIXED pve14
+              bytes_msg declared as int32_t accumulated size_t iov_len
+              values; signed overflow → undersized malloc + heap overflow.
+              Fix: bytes_msg → size_t.
+  ipc_glue.c  BUG-34 assert(qb_list_empty) crashes daemon      FIXED pve14
+              assert fires when queuing=false but outq_head non-empty.
+              Fix: log ERROR + set queuing=QB_TRUE + goto queue_msg.
+  cmap.c      BUG-35 assert(key_len<sizeof) crashes daemon     FIXED pve14
+              assert on overly-long key name in cmap_mcast_send().
+              Fix: log ERROR + skip item.
+  totemudpu.c BUG-36 assert(sock!=-1) crashes daemon           FIXED pve14
+              assert fires if local_loop_sock[0] uninitialised.
+              Fix: log WARNING + continue.
 
   Remaining known limitations (protocol-level, no C fix possible):
     - BUG-7: ARU amplification — 1 slow node forces N-1 retransmits/rotation
