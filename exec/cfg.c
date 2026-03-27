@@ -53,8 +53,6 @@
 #include <limits.h>
 #include <errno.h>
 #include <string.h>
-#include <assert.h>
-
 #include <corosync/corotypes.h>
 #include <qb/qbipc_common.h>
 #include <corosync/cfg.h>
@@ -355,7 +353,12 @@ static int send_shutdown(void)
 	iovec.iov_base = (char *)&req_exec_cfg_shutdown;
 	iovec.iov_len = sizeof (struct req_exec_cfg_shutdown);
 
-	assert (api->totem_mcast (&iovec, 1, TOTEM_SAFE) == 0);
+	/* BUG-44 (pve16): assert() crashes daemon if mcast fails under network pressure.
+	 * Fix: log WARNING and continue — other nodes will timeout and eject this node. */
+	if (api->totem_mcast (&iovec, 1, TOTEM_SAFE) != 0) {
+		log_printf(LOGSYS_LEVEL_WARNING,
+			"cfg: send_shutdown failed to multicast — shutdown will timeout on peers");
+	}
 
 	LEAVE();
 	return 0;
@@ -767,13 +770,25 @@ static void message_handler_req_exec_cfg_reload_config (
 	/* Take a copy of the current setup so we can check what has changed */
 	memset(&new_config, 0, sizeof(new_config));
 	new_config.orig_interfaces = malloc (sizeof (struct totem_interface) * INTERFACE_MAX);
-	assert(new_config.orig_interfaces != NULL);
+	/* BUG-45 (pve16): assert() crashes daemon on OOM. Fix: log + goto cleanup. */
+	if (new_config.orig_interfaces == NULL) {
+		log_printf(LOGSYS_LEVEL_ERROR,
+			"cfg: OOM allocating orig_interfaces for config reload — aborting reload");
+		res = CS_ERR_NO_MEMORY;
+		goto reload_fini;
+	}
 
 	totempg_get_config(&new_config);
 	new_config.crypto_changed = 0;
 
 	new_config.interfaces = malloc (sizeof (struct totem_interface) * INTERFACE_MAX);
-	assert(new_config.interfaces != NULL);
+	/* BUG-45 (pve16): assert() crashes daemon on OOM. Fix: log + goto cleanup. */
+	if (new_config.interfaces == NULL) {
+		log_printf(LOGSYS_LEVEL_ERROR,
+			"cfg: OOM allocating interfaces for config reload — aborting reload");
+		res = CS_ERR_NO_MEMORY;
+		goto reload_fini;
+	}
 	memset(new_config.interfaces, 0, sizeof (struct totem_interface) * INTERFACE_MAX);
 
 	/* For UDP[U] the configuration on link0 is static (apart from the nodelist) and only read at
@@ -866,7 +881,11 @@ reload_fini_nomap:
 		iovec.iov_base = (char *)&req_exec_cfg_crypto_reconfig;
 		iovec.iov_len = sizeof (struct req_exec_cfg_crypto_reconfig);
 
-		assert (api->totem_mcast (&iovec, 1, TOTEM_SAFE) == 0);
+		/* BUG-44 (pve16): assert() crashes on mcast failure. Fix: log ERROR + continue. */
+		if (api->totem_mcast (&iovec, 1, TOTEM_SAFE) != 0) {
+			log_printf(LOGSYS_LEVEL_ERROR,
+				"cfg: failed to multicast crypto reconfig activate — cluster may be inconsistent");
+		}
 	}
 
 	/* All done, return result to the caller if it was on this system */
@@ -917,7 +936,11 @@ static void message_handler_req_exec_cfg_reconfig_crypto (
 			iovec.iov_base = (char *)&req_exec_cfg_crypto_reconfig2;
 			iovec.iov_len = sizeof (struct req_exec_cfg_crypto_reconfig);
 
-			assert (api->totem_mcast (&iovec, 1, TOTEM_SAFE) == 0);
+			/* BUG-44 (pve16): assert() crashes on mcast failure. Fix: log ERROR + continue. */
+			if (api->totem_mcast (&iovec, 1, TOTEM_SAFE) != 0) {
+				log_printf(LOGSYS_LEVEL_ERROR,
+					"cfg: failed to multicast crypto reconfig cleanup — cluster may be inconsistent");
+			}
 		}
 	}
 }
@@ -953,7 +976,13 @@ static void message_handler_req_lib_cfg_ringstatusget (
 		&status,
 		&iface_count);
 
-	assert(iface_count <= CFG_MAX_INTERFACES);
+	/* BUG-45 (pve16): assert() crashes if iface_count somehow exceeds limit. Fix: clamp. */
+	if (iface_count > CFG_MAX_INTERFACES) {
+		log_printf(LOGSYS_LEVEL_WARNING,
+			"cfg: iface_count %u > CFG_MAX_INTERFACES %d — clamping",
+			iface_count, CFG_MAX_INTERFACES);
+		iface_count = CFG_MAX_INTERFACES;
+	}
 
 	res_lib_cfg_ringstatusget.interface_count = iface_count;
 
@@ -1454,7 +1483,18 @@ static void message_handler_req_lib_cfg_reload_config (void *conn, const void *m
 	iovec.iov_base = (char *)&req_exec_cfg_reload_config;
 	iovec.iov_len = sizeof (struct req_exec_cfg_reload_config);
 
-	assert (api->totem_mcast (&iovec, 1, TOTEM_SAFE) == 0);
+	/* BUG-44 (pve16): assert() crashes daemon if mcast fails under network pressure.
+	 * Fix: log ERROR, send error response to client, and unwind the refcnt inc. */
+	if (api->totem_mcast (&iovec, 1, TOTEM_SAFE) != 0) {
+		struct res_lib_cfg_reload_config res_err;
+		log_printf(LOGSYS_LEVEL_ERROR,
+			"cfg: failed to multicast reload config request — reload aborted");
+		res_err.header.size = sizeof(res_err);
+		res_err.header.id = MESSAGE_RES_CFG_RELOAD_CONFIG;
+		res_err.header.error = CS_ERR_LIBRARY;
+		api->ipc_response_send(conn, &res_err, sizeof(res_err));
+		api->ipc_refcnt_dec(conn);
+	}
 
 	LEAVE();
 }

@@ -1009,7 +1009,9 @@ static void are_we_quorate(unsigned int total_votes)
 				   "Waiting for all cluster members. "
 				   "Current votes: %d expected_votes: %d",
 				   total_votes, us->expected_votes);
-			assert(!cluster_is_quorate);
+			/* BUG-46 (pve16): assert(!cluster_is_quorate) crashes daemon on race
+			 * where quorum was already granted before wait_for_all triggered.
+			 * Fix: remove the assert; the return below handles it correctly. */
 			return;
 		}
 		update_wait_for_all_status(0);
@@ -1738,10 +1740,18 @@ static int votequorum_exec_send_qdevice_reconfigure(const char *oldname, const c
 	req_exec_quorum_qdevice_reconfigure.header.id = SERVICE_ID_MAKE(VOTEQUORUM_SERVICE, MESSAGE_REQ_EXEC_VOTEQUORUM_QDEVICE_RECONFIGURE);
 	req_exec_quorum_qdevice_reconfigure.header.size = sizeof(req_exec_quorum_qdevice_reconfigure);
 
-	assert(strlen(oldname) < sizeof(req_exec_quorum_qdevice_reconfigure.oldname));
+	/* BUG-46 (pve16): assert() crashes daemon if qdevice sends overlong name.
+	 * Fix: validate length + return error instead of crashing. */
+	if (strlen(oldname) >= sizeof(req_exec_quorum_qdevice_reconfigure.oldname) ||
+	    strlen(newname) >= sizeof(req_exec_quorum_qdevice_reconfigure.newname)) {
+		log_printf(LOGSYS_LEVEL_ERROR,
+			"votequorum: qdevice_reconfigure name too long (old=%zu new=%zu max=%zu)",
+			strlen(oldname), strlen(newname),
+			sizeof(req_exec_quorum_qdevice_reconfigure.oldname) - 1);
+		LEAVE();
+		return -1;
+	}
 	strcpy(req_exec_quorum_qdevice_reconfigure.oldname, oldname);
-
-	assert(strlen(newname) < sizeof(req_exec_quorum_qdevice_reconfigure.newname));
 	strcpy(req_exec_quorum_qdevice_reconfigure.newname, newname);
 
 	iov[0].iov_base = (void *)&req_exec_quorum_qdevice_reconfigure;
@@ -1765,7 +1775,16 @@ static int votequorum_exec_send_qdevice_reg(uint32_t operation, const char *qdev
 	req_exec_quorum_qdevice_reg.header.size = sizeof(req_exec_quorum_qdevice_reg);
 	req_exec_quorum_qdevice_reg.operation = operation;
 
-	assert(strlen(qdevice_name_req) < sizeof(req_exec_quorum_qdevice_reg.qdevice_name));
+	/* BUG-46 (pve16): assert() crashes daemon if qdevice sends overlong name.
+	 * Fix: validate length + return error instead of crashing. */
+	if (strlen(qdevice_name_req) >= sizeof(req_exec_quorum_qdevice_reg.qdevice_name)) {
+		log_printf(LOGSYS_LEVEL_ERROR,
+			"votequorum: qdevice_reg name too long (%zu >= %zu)",
+			strlen(qdevice_name_req),
+			sizeof(req_exec_quorum_qdevice_reg.qdevice_name));
+		LEAVE();
+		return -1;
+	}
 	strcpy(req_exec_quorum_qdevice_reg.qdevice_name, qdevice_name_req);
 
 	iov[0].iov_base = (void *)&req_exec_quorum_qdevice_reg;
@@ -2120,7 +2139,14 @@ static void message_handler_req_exec_votequorum_nodeinfo (
 	if (nodeid == VOTEQUORUM_QDEVICE_NODEID) {
 		struct cluster_node *sender_node = find_node_by_nodeid(sender_nodeid);
 
-		assert(sender_node != NULL);
+		/* BUG-47 (pve16): assert() crashes if sender not yet in node list (e.g. during
+		 * recovery or node churn). Fix: log WARNING + return gracefully. */
+		if (sender_node == NULL) {
+			log_printf(LOGSYS_LEVEL_WARNING,
+				"votequorum: QDEVICE nodeinfo from unknown sender " CS_PRI_NODE_ID " — ignoring",
+				sender_nodeid);
+			return;
+		}
 
 		if ((!cluster_is_quorate) &&
 		    (sender_node->flags & NODE_FLAGS_QUORATE)) {

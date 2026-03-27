@@ -1164,6 +1164,16 @@ static void exec_cpg_downlist_endian_convert (void *msg)
 	req_exec_cpg_downlist->left_nodes = swab32(req_exec_cpg_downlist->left_nodes);
 	req_exec_cpg_downlist->old_members = swab32(req_exec_cpg_downlist->old_members);
 
+	/* BUG-49 (pve16): wire-derived left_nodes is unbounded; nodeids[] has only
+	 * PROCESSOR_COUNT_MAX entries. A bit-flipped or malformed message would cause
+	 * an OOB read in the swab loop. Fix: clamp before iterating. */
+	if (req_exec_cpg_downlist->left_nodes > PROCESSOR_COUNT_MAX) {
+		log_printf(LOGSYS_LEVEL_WARNING,
+			"cpg: left_nodes %u > PROCESSOR_COUNT_MAX %d in downlist endian convert — clamping",
+			req_exec_cpg_downlist->left_nodes, PROCESSOR_COUNT_MAX);
+		req_exec_cpg_downlist->left_nodes = PROCESSOR_COUNT_MAX;
+	}
+
 	for (i = 0; i < req_exec_cpg_downlist->left_nodes; i++) {
 		req_exec_cpg_downlist->nodeids[i] = swab32(req_exec_cpg_downlist->nodeids[i]);
 	}
@@ -1892,7 +1902,18 @@ static void message_handler_req_lib_cpg_zc_alloc (
 
 	res = zcb_alloc (cpd, hdr->path_to_file, hdr->map_size,
 		&addr);
-	assert(res == 0);
+	/* BUG-48 (pve16): assert() crashes daemon if ZC buffer alloc fails (e.g. ENOMEM or
+	 * file mapping error). Fix: send error response to client instead of crashing. */
+	if (res != 0) {
+		log_printf(LOGSYS_LEVEL_ERROR,
+			"cpg: zcb_alloc failed for %s (err=%u) — sending error response",
+			hdr->path_to_file, res);
+		res_header.size = sizeof(res_header);
+		res_header.id = 0;
+		res_header.error = CS_ERR_NO_MEMORY;
+		api->ipc_response_send(conn, &res_header, res_header.size);
+		return;
+	}
 
 	zc_header = (struct coroipcs_zc_header *)addr;
 	zc_header->server_address = void2serveraddr(addr);
@@ -1986,7 +2007,14 @@ static void message_handler_req_lib_cpg_partial_mcast (void *conn, const void *m
 		req_exec_cpg_iovec[1].iov_len = msglen;
 
 		result = api->totem_mcast (req_exec_cpg_iovec, 2, TOTEM_AGREED);
-		assert(result == 0);
+		/* BUG-48 (pve16): assert() crashes daemon if mcast fails under load.
+		 * Fix: log ERROR and fall through to send error response to client. */
+		if (result != 0) {
+			log_printf(LOGSYS_LEVEL_ERROR,
+				"cpg: partial mcast failed (result=%d) for group %s",
+				result, group_name.value);
+			error = CS_ERR_LIBRARY;
+		}
 	} else {
 		log_printf(LOGSYS_LEVEL_ERROR, "*** %p can't mcast to group %s state:%d, error:%d",
 			   conn, group_name.value, cpd->cpd_state, error);
@@ -2045,7 +2073,13 @@ static void message_handler_req_lib_cpg_mcast (void *conn, const void *message)
 		req_exec_cpg_iovec[1].iov_len = msglen;
 
 		result = api->totem_mcast (req_exec_cpg_iovec, 2, TOTEM_AGREED);
-		assert(result == 0);
+		/* BUG-48 (pve16): assert() crashes daemon if mcast fails under load.
+		 * Fix: log ERROR — no explicit response needed (caller handles via res_lib). */
+		if (result != 0) {
+			log_printf(LOGSYS_LEVEL_ERROR,
+				"cpg: mcast failed (result=%d) for group %s",
+				result, group_name.value);
+		}
 	} else {
 		log_printf(LOGSYS_LEVEL_ERROR, "*** %p can't mcast to group %s state:%d, error:%d",
 			conn, group_name.value, cpd->cpd_state, error);
