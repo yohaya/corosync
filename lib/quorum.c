@@ -545,6 +545,14 @@ cs_error_t quorum_dispatch (
 				ring_id.nodeid = res_lib_quorum_v1_nodelist_notification->ring_id.nodeid;
 				ring_id.seq = res_lib_quorum_v1_nodelist_notification->ring_id.seq;
 
+				if (((size_t)res_lib_quorum_v1_nodelist_notification->member_list_entries +
+				     res_lib_quorum_v1_nodelist_notification->joined_list_entries +
+				     res_lib_quorum_v1_nodelist_notification->left_list_entries) *
+				    sizeof(mar_uint32_t) >
+				    (size_t)dispatch_data->size - sizeof(struct res_lib_quorum_v1_nodelist_notification)) {
+					break;
+				}
+
 				joined_list = res_lib_quorum_v1_nodelist_notification->member_list +
 				    res_lib_quorum_v1_nodelist_notification->member_list_entries;
 				left_list = joined_list +

@@ -334,8 +334,13 @@ static const char *node_name(uint32_t nodeid, name_format_t name_format)
 	if ((nodelist_name) &&
 	    (strlen(nodelist_name) > 0)) {
 		start_addr = 1;
-		assert(strlen(nodelist_name) < sizeof(buf));
-		strcpy(buf, nodelist_name);
+		if (strlen(nodelist_name) >= sizeof(buf)) {
+			fprintf(stderr, "nodelist name too long — truncating\n");
+			strncpy(buf, nodelist_name, sizeof(buf) - 1);
+			buf[sizeof(buf) - 1] = '\0';
+		} else {
+			strcpy(buf, nodelist_name);
+		}
 		bufptr = strlen(buf);
 	}
 

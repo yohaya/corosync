@@ -387,7 +387,10 @@ static void _cs_cmap_link_added_removed (
 	/* Add/remove a tracker for a new/removed knet link */
 	if (strstr(key_name, ".connected")) {
 		if (event == CMAP_TRACK_ADD) {
-			assert(strlen(key_name) < sizeof(track_item->key_name));
+			if (strlen(key_name) >= sizeof(track_item->key_name)) {
+				qb_log(LOG_WARNING, "key_name too long for track_item — skipping");
+				return;
+			}
 
 			track_item = malloc(sizeof(struct track_item));
 			if (!track_item) {
@@ -793,6 +796,9 @@ static netsnmp_session *_cs_snmp_session_init (const char *target)
 	}
 
 	session = malloc (sizeof (netsnmp_session));
+	if (session == NULL) {
+		return NULL;
+	}
 	snmp_sess_init (session);
 	session->version = SNMP_VERSION_2c;
 	session->callback = NULL;
