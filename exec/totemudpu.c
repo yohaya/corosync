@@ -1140,7 +1140,15 @@ extern int totemudpu_recv_mcast_empty (
 		if (i == 1) {
 			sock = instance->local_loop_sock[0];
 		}
-		assert(sock != -1);
+		/* BUG-36 (pve14): assert() crashes daemon if local_loop_sock[0] is
+		 * uninitialised (-1) due to earlier socket setup failure.
+		 * Replace with graceful skip — log the error and continue the
+		 * loop iteration so the token socket (i==0) still gets processed. */
+		if (sock == -1) {
+			log_printf(LOGSYS_LEVEL_WARNING,
+			    "totemudpu recv: sock fd invalid for iteration i=%d, skipping", i);
+			continue;
+		}
 
 		do {
 			ufd.fd = sock;

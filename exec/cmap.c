@@ -965,8 +965,15 @@ static cs_error_t cmap_mcast_send(enum cmap_mcast_reason reason, int argc, char 
 		item->value_len = value_len;
 		item->key_name.length = strlen(argv[i]);
 
-		assert(strlen(argv[i]) < sizeof(item->key_name.value));
-
+		/* BUG-35 (pve14): assert() crashes daemon on overly-long key name.
+		 * Replace with graceful log + skip. */
+		if (strlen(argv[i]) >= sizeof(item->key_name.value)) {
+			log_printf(LOGSYS_LEVEL_ERROR,
+			    "cmap_mcast_send: key '%s' too long (%zu >= %zu), skipping item",
+			    argv[i], strlen(argv[i]), sizeof(item->key_name.value));
+			free(item);
+			goto free_mem;
+		}
 		strcpy((char *)item->key_name.value, argv[i]);
 
 		if (value_type != ICMAP_VALUETYPE_NOT_EXIST) {
@@ -1011,6 +1018,14 @@ static struct req_exec_cmap_mcast_item *cmap_mcast_item_find(
 		char *key)
 {
 	const struct req_exec_cmap_mcast *req_exec_cmap_mcast = message;
+	/* BUG-32 (pve14): use header.size to bound item iteration.
+	 * no_items and each item->value_len come from the wire.  Without a
+	 * boundary check, a crafted message (no_items > actual items present,
+	 * or huge value_len) advances p past the message buffer into adjacent
+	 * heap/stack memory — out-of-bounds read.  Use header.size as the
+	 * authoritative message end.  Also guard against no_items==0 shortpath
+	 * and size too small to hold even one item header. */
+	const char *msg_end = (const char *)message + req_exec_cmap_mcast->header.size;
 	int i;
 	const char *p;
 	struct req_exec_cmap_mcast_item *item;
@@ -1019,7 +1034,14 @@ static struct req_exec_cmap_mcast_item *cmap_mcast_item_find(
 	p = (const char *)message + sizeof(*req_exec_cmap_mcast);
 
 	for (i = 0; i < req_exec_cmap_mcast->no_items; i++) {
+		if ((const char *)p + sizeof(*item) > msg_end) {
+			break;
+		}
 		item = (struct req_exec_cmap_mcast_item *)p;
+
+		if ((const char *)p + sizeof(*item) + item->value_len > msg_end) {
+			break;
+		}
 
 		key_name_len = item->key_name.length;
 		if (strlen(key) == key_name_len && strcmp((char *)item->key_name.value, key) == 0) {
@@ -1027,6 +1049,9 @@ static struct req_exec_cmap_mcast_item *cmap_mcast_item_find(
 		}
 
 		p += MAR_ALIGN_UP(sizeof(*item) + item->value_len, 8);
+		if (p > msg_end) {
+			break;
+		}
 	}
 
 	return (NULL);
@@ -1101,6 +1126,10 @@ static void exec_cmap_mcast_endian_convert(void *message)
 {
 	struct req_exec_cmap_mcast *req_exec_cmap_mcast = message;
 	const char *p;
+	/* BUG-32 (pve14): bound item loop by converted header.size (see
+	 * cmap_mcast_item_find comment).  swab_coroipc_request_header_t converts
+	 * header.size to native endian before we use it as the loop bound. */
+	const char *msg_end;
 	int i;
 	struct req_exec_cmap_mcast_item *item;
 	uint16_t u16;
@@ -1110,14 +1139,22 @@ static void exec_cmap_mcast_endian_convert(void *message)
 	double dbl;
 
 	swab_coroipc_request_header_t(&req_exec_cmap_mcast->header);
+	msg_end = (const char *)message + req_exec_cmap_mcast->header.size;
 
 	p = (const char *)message + sizeof(*req_exec_cmap_mcast);
 
 	for (i = 0; i < req_exec_cmap_mcast->no_items; i++) {
+		if ((const char *)p + sizeof(*item) > msg_end) {
+			break;
+		}
 		item = (struct req_exec_cmap_mcast_item *)p;
 
 		swab_mar_uint16_t(&item->key_name.length);
 		swab_mar_size_t(&item->value_len);
+
+		if ((const char *)p + sizeof(*item) + item->value_len > msg_end) {
+			break;
+		}
 
 		switch (item->value_type) {
 		case ICMAP_VALUETYPE_INT16:
@@ -1151,5 +1188,8 @@ static void exec_cmap_mcast_endian_convert(void *message)
 		}
 
 		p += MAR_ALIGN_UP(sizeof(*item) + item->value_len, 8);
+		if (p > msg_end) {
+			break;
+		}
 	}
 }

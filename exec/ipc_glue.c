@@ -421,8 +421,11 @@ static void outq_flush (void *data)
 static void msg_send_or_queue(qb_ipcs_connection_t *conn, const struct iovec *iov, uint32_t iov_len)
 {
 	int32_t rc = 0;
-	int32_t i;
-	int32_t bytes_msg = 0;
+	uint32_t i;
+	size_t bytes_msg = 0;   /* BUG-33 (pve14): was int32_t — iov_len is size_t;
+	                         * signed accumulation can overflow on large messages,
+	                         * yielding a negative bytes_msg → malloc(SIZE_MAX-N)
+	                         * or undersized allocation + heap overflow on memcpy. */
 	struct outq_item *outq_item;
 	char *write_buf = 0;
 	struct cs_ipcs_conn_context *context = qb_ipcs_context_get(conn);
@@ -432,9 +435,18 @@ static void msg_send_or_queue(qb_ipcs_connection_t *conn, const struct iovec *io
 	}
 
 	if (!context->queuing) {
-		assert(qb_list_empty (&context->outq_head));
+		/* BUG-34 (pve14): assert() crashed the daemon when queuing=false
+		 * but outq_head was non-empty (state inconsistency).  Replace with
+		 * a graceful recovery: log the error and enter queuing mode so the
+		 * connection isn't silently mis-sequenced. */
+		if (!qb_list_empty (&context->outq_head)) {
+			log_printf (LOGSYS_LEVEL_ERROR,
+			    "IPC outq non-empty while queuing=false — forcing queuing mode");
+			context->queuing = QB_TRUE;
+			goto queue_msg;
+		}
 		rc = qb_ipcs_event_sendv(conn, iov, iov_len);
-		if (rc == bytes_msg) {
+		if (rc > 0 && (size_t)rc == bytes_msg) {
 			context->sent++;
 			return;
 		}
@@ -444,10 +456,11 @@ static void msg_send_or_queue(qb_ipcs_connection_t *conn, const struct iovec *io
 			context->queuing = QB_TRUE;
 			qb_loop_job_add(cs_poll_handle_get(), QB_LOOP_HIGH, conn, outq_flush);
 		} else {
-			log_printf(LOGSYS_LEVEL_ERROR, "event_send retuned %d, expected %d!", rc, bytes_msg);
+			log_printf(LOGSYS_LEVEL_ERROR, "event_send retuned %d, expected %zu!", rc, bytes_msg);
 			return;
 		}
 	}
+queue_msg:
 	outq_item = malloc (sizeof (struct outq_item));
 	if (outq_item == NULL) {
 		qb_ipcs_disconnect(conn);
