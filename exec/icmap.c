@@ -1185,6 +1185,10 @@ cs_error_t icmap_track_add(
 
 	if (key_name != NULL) {
 		(*icmap_track)->key_name = strdup(key_name);
+		if ((*icmap_track)->key_name == NULL) {
+			free(*icmap_track);
+			return (CS_ERR_NO_MEMORY);
+		}
 	};
 
 	(*icmap_track)->track_type = track_type;

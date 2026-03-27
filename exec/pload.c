@@ -314,7 +314,18 @@ static void message_handler_req_exec_pload_start (
 	pload_started = 1;
 
 	msgs_wanted = req_exec_pload_start->msg_count;
+	if (msgs_wanted == 0) {
+		pload_started = 0;
+		return;
+	}
+
 	msg_size = req_exec_pload_start->msg_size;
+	if (msg_size > MESSAGE_SIZE_MAX) {
+		log_printf(LOGSYS_LEVEL_WARNING,
+			"pload: msg_size %u from wire exceeds MESSAGE_SIZE_MAX %u — clamping",
+			msg_size, (unsigned int)MESSAGE_SIZE_MAX);
+		msg_size = MESSAGE_SIZE_MAX;
+	}
 
 	api->schedwrk_create (
 		&start_mcasting_handle,

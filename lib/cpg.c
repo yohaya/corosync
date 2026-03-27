@@ -551,6 +551,16 @@ cs_error_t cpg_dispatch (
 
 				res_cpg_confchg_callback = (struct res_lib_cpg_confchg_callback *)dispatch_data;
 
+				if (res_cpg_confchg_callback->member_list_entries > CPG_MEMBERS_MAX) {
+					res_cpg_confchg_callback->member_list_entries = CPG_MEMBERS_MAX;
+				}
+				if (res_cpg_confchg_callback->left_list_entries > CPG_MEMBERS_MAX) {
+					res_cpg_confchg_callback->left_list_entries = CPG_MEMBERS_MAX;
+				}
+				if (res_cpg_confchg_callback->joined_list_entries > CPG_MEMBERS_MAX) {
+					res_cpg_confchg_callback->joined_list_entries = CPG_MEMBERS_MAX;
+				}
+
 				for (i = 0; i < res_cpg_confchg_callback->member_list_entries; i++) {
 					marshall_from_mar_cpg_address_t (&member_list[i],
 						&res_cpg_confchg_callback->member_list[i]);
@@ -605,6 +615,9 @@ cs_error_t cpg_dispatch (
 				res_cpg_totem_confchg_callback = (struct res_lib_cpg_totem_confchg_callback *)dispatch_data;
 
 				marshall_from_mar_cpg_ring_id_t (&ring_id, &res_cpg_totem_confchg_callback->ring_id);
+				if (res_cpg_totem_confchg_callback->member_list_entries > CPG_MEMBERS_MAX) {
+					res_cpg_totem_confchg_callback->member_list_entries = CPG_MEMBERS_MAX;
+				}
 				for (i = 0; i < res_cpg_totem_confchg_callback->member_list_entries; i++) {
 					totem_member_list[i] = res_cpg_totem_confchg_callback->member_list[i];
 				}
