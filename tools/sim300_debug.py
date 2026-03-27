@@ -491,6 +491,7 @@ class Ring:
     def _new_ring(self, trigger_node: int, sim_time: float, reason: str) -> None:
         global _cascade_depth, _cascade_max_depth, _cascade_start_time
         global _memb_index_overflow_events, _token_memb_empty_events
+        global _prev_delivered
 
         self._sim_ring_recovery_memory(sim_time)
 
@@ -564,6 +565,16 @@ class Ring:
             n.last_released = SEQNO_INITIAL
             n.rx_set.clear()
             n.inbox.clear()
+
+        # BUG-31 SIM FIX (pve13): clear ordering-check baselines for all nodes.
+        # _new_ring resets my_delivered to SEQNO_INITIAL for every node, starting
+        # a fresh seqno space after recovery.  _prev_delivered retains the old
+        # pre-recovery values; when my_delivered advances in the new space, the
+        # BUG-17 check computes a small gap against the old baseline and finds
+        # holes in rx_set (which was also cleared above) — a guaranteed false
+        # positive.  Clearing here ensures the ordering check starts fresh
+        # alongside the ring itself.
+        _prev_delivered.clear()
 
     # ---- assert-site checks ----
 
@@ -1532,12 +1543,16 @@ def print_results(args, nodes: List[Node], ring: Ring) -> None:
               as int (signed) causing signed multiplication in datasize.
               Same BUG-27 pattern; mitigated by downstream length check
               but type-incorrect.  Fix: unsigned int msg_count.
-  sim         BUG-31 rejoin path ordering false positive     FIXED pve13
-              Simplified rejoin() fills rx_set from rtx_buf only, then
-              flush_inbox() advances my_delivered to group_aru.  Without
-              resetting _prev_delivered baseline, BUG-17 check flags
-              subsequent small delivery advances as ordering violations.
-              Fix: set _prev_delivered[node_id]=my_delivered after rejoin.
+  sim         BUG-31 ordering check false positives          FIXED pve13
+              Two paths created spurious delivery_order_violation probes:
+              (a) rejoin(): fills rx_set from rtx_buf (incomplete for long
+              partitions), then flush_inbox() advances my_delivered to
+              group_aru; BUG-17 finds holes in rx_set on next increment.
+              Fix: reset _prev_delivered[node_id] after rejoin().
+              (b) _new_ring(): resets all my_delivered to SEQNO_INITIAL for
+              a fresh seqno space, but _prev_delivered retained old values;
+              BUG-17 computed gaps against stale pre-recovery baselines.
+              Fix: _prev_delivered.clear() in _new_ring().
 
   Remaining known limitations (protocol-level, no C fix possible):
     - BUG-7: ARU amplification — 1 slow node forces N-1 retransmits/rotation
