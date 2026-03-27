@@ -1433,7 +1433,7 @@ def print_results(args, nodes: List[Node], ring: Ring) -> None:
 
     # ---- FIXES NEEDED section ----
     print(f"\n{'=' * 80}")
-    print(f"  === ALL KNOWN C CODE FIXES (status as of pve9) ===")
+    print(f"  === ALL KNOWN C CODE FIXES (status as of pve10) ===")
     print(f"{'=' * 80}")
     print(f"""
   All assert crash sites and stability bugs have been fixed in pve1–pve9.
