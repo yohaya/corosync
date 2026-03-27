@@ -607,6 +607,18 @@ static void deliver_fn (
 	service = id >> 16;
 	fn_id = id & 0xffff;
 
+	/* BUG-50 (pve16): service is extracted from the wire-derived id field via
+	 * right-shift; values 0..65535 are possible but corosync_service[] and
+	 * service_stats_rx[][] only have SERVICES_COUNT_MAX (64) entries.
+	 * Without a bounds check the NULL test itself performs an OOB array read.
+	 * Fix: reject any service index outside the valid range. */
+	if (service < 0 || service >= SERVICES_COUNT_MAX) {
+		log_printf(LOGSYS_LEVEL_WARNING,
+			"deliver_fn: discarded message with out-of-range service %d from node %u",
+			service, nodeid);
+		return;
+	}
+
 	if (!corosync_service[service]) {
 		return;
 	}
@@ -619,9 +631,17 @@ static void deliver_fn (
 	icmap_fast_inc(service_stats_rx[service][fn_id]);
 
 	if (endian_conversion_required) {
-		assert(corosync_service[service]->exec_engine[fn_id].exec_endian_convert_fn != NULL);
-		corosync_service[service]->exec_engine[fn_id].exec_endian_convert_fn
-			((void *)msg);
+		/* BUG-51 (pve16): assert() crashes daemon if a handler has no endian
+		 * conversion function. Fix: log WARNING + skip conversion (message
+		 * will be delivered as-is; handler must tolerate it or reject). */
+		if (corosync_service[service]->exec_engine[fn_id].exec_endian_convert_fn == NULL) {
+			log_printf(LOGSYS_LEVEL_WARNING,
+				"deliver_fn: no endian_convert_fn for service %d fn %d — skipping conversion",
+				service, fn_id);
+		} else {
+			corosync_service[service]->exec_engine[fn_id].exec_endian_convert_fn
+				((void *)msg);
+		}
 	}
 
 	corosync_service[service]->exec_engine[fn_id].exec_handler_fn
@@ -640,7 +660,9 @@ int main_mcast (
 	service = req->id >> 16;
 	fn_id = req->id & 0xffff;
 
-	if (corosync_service[service]) {
+	/* BUG-50 (pve16): same bounds check as deliver_fn — service can be 0..65535
+	 * from the wire; must be within SERVICES_COUNT_MAX before array access. */
+	if (service >= 0 && service < SERVICES_COUNT_MAX && corosync_service[service]) {
 		icmap_fast_inc(service_stats_tx[service][fn_id]);
 	}
 

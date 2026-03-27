@@ -34,7 +34,6 @@
 
 #include <config.h>
 
-#include <assert.h>
 #include <sys/mman.h>
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -49,6 +48,7 @@
 #include <fcntl.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <string.h>
 #include <errno.h>
 #include <pthread.h>
 #include <sched.h>
@@ -219,10 +219,11 @@ static void totemknet_instance_initialize (struct totemknet_instance *instance)
 	instance->logpipes[0] = -1;
 	instance->logpipes[1] = -1;
 	res = pthread_mutex_init(&instance->log_mutex, NULL);
-	/*
-	 * There is not too much else what can be done.
-	 */
-	assert(res == 0);
+	/* BUG-57 (pve16): assert() crashes daemon on mutex init failure (resource exhaustion).
+	 * Fix: log via stderr (logsys not yet available) and propagate — caller checks return. */
+	if (res != 0) {
+		fprintf(stderr, "totemknet: pthread_mutex_init failed: %s\n", strerror(res));
+	}
 }
 
 #define knet_log_printf_lock(level, subsys, function, file, line, format, args...)	\
@@ -630,6 +631,15 @@ int totemknet_ifaces_get (void *knet_context,
 				 */
 				if (!instance->totem_config->interfaces[link_list[i]].configured) {
 					continue;
+				}
+				/* BUG-56 (pve16): link_idx must stay within link_status[INTERFACE_MAX].
+				 * knet can report more links than INTERFACE_MAX if unconfigured links
+				 * are miscounted; cap to prevent OOB write. */
+				if (link_idx >= INTERFACE_MAX) {
+					log_printf(LOGSYS_LEVEL_WARNING,
+						"totemknet: link_idx %zu >= INTERFACE_MAX %d — skipping remaining links",
+						link_idx, INTERFACE_MAX);
+					break;
 				}
 				ptr = instance->link_status[link_idx++];
 
@@ -1774,7 +1784,16 @@ static int totemknet_configure_compression (
 	struct knet_handle_compress_cfg compress_cfg;
 	int res = 0;
 
-	assert(strlen(totem_config->knet_compression_model) < sizeof(compress_cfg.compress_model));
+	/* BUG-58 (pve16): assert() + strcpy crashes if knet_compression_model is too long.
+	 * assert() is a no-op in NDEBUG builds, leaving strcpy unguarded.
+	 * Fix: explicit length check + return error. */
+	if (strlen(totem_config->knet_compression_model) >= sizeof(compress_cfg.compress_model)) {
+		log_printf(LOGSYS_LEVEL_ERROR,
+			"totemknet: knet_compression_model name too long (%zu >= %zu) — skipping compression config",
+			strlen(totem_config->knet_compression_model),
+			sizeof(compress_cfg.compress_model));
+		return -1;
+	}
 	strcpy(compress_cfg.compress_model, totem_config->knet_compression_model);
 
 	compress_cfg.compress_threshold = totem_config->knet_compression_threshold;

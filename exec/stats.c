@@ -248,7 +248,13 @@ static void stats_map_set_value(struct cs_stats_conv *conv,
 		}
 	}
 	if (value) {
-		assert(value_len != NULL);
+		/* BUG-53 (pve16): assert() crashes daemon if caller passes value!=NULL
+		 * but value_len==NULL. Fix: log and return gracefully. */
+		if (value_len == NULL) {
+			log_printf(LOGSYS_LEVEL_WARNING,
+				"stats: value non-NULL but value_len is NULL — skipping memcpy");
+			return;
+		}
 
 		memcpy(value, (char *)(stat_array) + conv->offset, *value_len);
 	}
@@ -261,6 +267,12 @@ static void stats_add_entry(const char *key, struct cs_stats_conv *cs_conv)
 	if (item) {
 		item->cs_conv = cs_conv;
 		item->key_name = strdup(key);
+		/* BUG-54 (pve16): strdup result not checked; qb_map_put with NULL key
+		 * causes undefined behavior. Fix: free item and return on OOM. */
+		if (item->key_name == NULL) {
+			free(item);
+			return;
+		}
 		qb_map_put(stats_map, item->key_name, item);
 	}
 }
@@ -399,6 +411,12 @@ cs_error_t stats_map_get(const char *key_name,
 			break;
 		case STAT_SCHEDMISS:
 			if (sscanf(key_name, SCHEDMISS_PREFIX ".%u", &sm_event) != 1) {
+				return CS_ERR_NOT_EXIST;
+			}
+
+			/* BUG-52 (pve16): sm_event from sscanf is unbounded; schedmiss_event[]
+			 * has only MAX_SCHEDMISS_EVENTS entries. Fix: reject out-of-range index. */
+			if (sm_event >= MAX_SCHEDMISS_EVENTS) {
 				return CS_ERR_NOT_EXIST;
 			}
 

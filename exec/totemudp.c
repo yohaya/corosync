@@ -35,7 +35,6 @@
 
 #include <config.h>
 
-#include <assert.h>
 #include <pthread.h>
 #include <sys/mman.h>
 #include <sys/types.h>
@@ -1223,7 +1222,13 @@ int totemudp_recv_flush (void *udp_context)
 		if (i == 1) {
 		    sock = instance->totemudp_sockets.local_mcast_loop[0];
 		}
-		assert(sock != -1);
+		/* BUG-55 (pve16): assert(sock != -1) crashes daemon if socket was not
+		 * initialised (e.g. bind failure during setup). Fix: log + continue. */
+		if (sock == -1) {
+			log_printf(LOGSYS_LEVEL_WARNING,
+				"totemudp: recv_flush skipping uninitialised socket (index %d)", i);
+			continue;
+		}
 
 		do {
 			ufd.fd = sock;
@@ -1396,7 +1401,12 @@ extern int totemudp_recv_mcast_empty (
 		if (i == 1) {
 		    sock = instance->totemudp_sockets.local_mcast_loop[0];
 		}
-		assert(sock != -1);
+		/* BUG-55 (pve16): same guard as recv_flush — skip uninitialised sockets. */
+		if (sock == -1) {
+			log_printf(LOGSYS_LEVEL_WARNING,
+				"totemudp: send_flush skipping uninitialised socket (index %d)", i);
+			continue;
+		}
 
 		do {
 			ufd.fd = sock;
