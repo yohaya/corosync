@@ -457,6 +457,11 @@ cs_error_t cpg_dispatch (
 
 				res_cpg_deliver_callback = (struct res_lib_cpg_deliver_callback *)dispatch_data;
 
+				if (res_cpg_deliver_callback->msglen >
+				    (size_t)dispatch_data->size - sizeof(struct res_lib_cpg_deliver_callback)) {
+					break;
+				}
+
 				marshall_from_mar_cpg_name_t (
 					&group_name,
 					&res_cpg_deliver_callback->group_name);
@@ -523,6 +528,12 @@ cs_error_t cpg_dispatch (
 					qb_list_add (&assembly_data->list, &cpg_inst->assembly_list_head);
 				}
 				if (assembly_data) {
+					if (res_cpg_partial_deliver_callback->fraglen >
+					    (size_t)dispatch_data->size - sizeof(struct res_lib_cpg_partial_deliver_callback) ||
+					    assembly_data->assembly_buf_ptr + res_cpg_partial_deliver_callback->fraglen >
+					    res_cpg_partial_deliver_callback->msglen) {
+						break;
+					}
 					memcpy(assembly_data->assembly_buf + assembly_data->assembly_buf_ptr,
 						res_cpg_partial_deliver_callback->message, res_cpg_partial_deliver_callback->fraglen);
 					assembly_data->assembly_buf_ptr += res_cpg_partial_deliver_callback->fraglen;
